@@ -33,7 +33,7 @@ jobs:
             arch: x86_64
             cmake_processor: amd64
             runner: ubuntu-latest
-            build_ffmpeg_from_source: false
+            build_mode: prebuilt
           # EXPERIMENTAL: aarch64 was dropped from LizardByte/build-deps'
           # prebuilt FFmpeg releases (build-deps#757) for being too slow
           # under nested QEMU virtualization. This entry builds FFmpeg (and
@@ -45,7 +45,23 @@ jobs:
             arch: aarch64
             cmake_processor: arm64
             runner: ubuntu-latest
-            build_ffmpeg_from_source: true
+            build_mode: source
+          # EXPERIMENTAL: build via the actual FreeBSD ports-tree submission
+          # (poudriere + the real port Makefile/pkg-plist, copied into
+          # .github/freebsd-port-experiment/multimedia/sunshine for this
+          # test) instead of Sunshine's own direct cmake/ninja/cpack CI
+          # build. Measures whether a real ports-tree-style poudriere build
+          # is viable time-wise in this CI environment, both architectures.
+          - bsd_release: '15.1'
+            arch: x86_64
+            cmake_processor: amd64-poudriere
+            runner: ubuntu-latest
+            build_mode: poudriere
+          - bsd_release: '15.1'
+            arch: aarch64
+            cmake_processor: arm64-poudriere
+            runner: ubuntu-latest
+            build_mode: poudriere
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -109,7 +125,7 @@ jobs:
               x11/libXtst \
               x11-servers/xorg-server
 
-            if [ "${{ matrix.build_ffmpeg_from_source }}" = "true" ]; then
+            if [ "${{ matrix.build_mode }}" = "source" ]; then
               # extra build tooling only needed to compile LizardByte/build-deps
               # (FFmpeg + x264/x265/SvtAv1Enc) from source ourselves, since no
               # prebuilt FreeBSD/aarch64 archive is currently published
@@ -119,6 +135,10 @@ jobs:
                 devel/gmake \
                 devel/libtool \
                 devel/nasm
+            fi
+
+            if [ "${{ matrix.build_mode }}" = "poudriere" ]; then
+              pkg install -y ports-mgmt/poudriere
             fi
 
             # create symlink for shebang bash compatibility
@@ -161,7 +181,7 @@ jobs:
       # actually true end-to-end in this exact CI environment, using the
       # same build-deps CMake project upstream's own release process uses.
       - name: Build FFmpeg from source (aarch64 experiment)
-        if: matrix.build_ffmpeg_from_source
+        if: matrix.build_mode == 'source'
         shell: freebsd {0}
         run: |
           set -e
@@ -194,6 +214,7 @@ jobs:
           echo "FFMPEG_PREPARED_BINARIES=${build_deps_dist}/ffmpeg" >> "${GITHUB_ENV}"
 
       - name: Configure
+        if: matrix.build_mode != 'poudriere'
         shell: freebsd {0}
         run: |
           set -e
@@ -235,6 +256,7 @@ jobs:
             -DSUNSHINE_PUBLISHER_ISSUE_URL="https://app.lizardbyte.dev/support"
 
       - name: Build
+        if: matrix.build_mode != 'poudriere'
         shell: freebsd {0}
         run: |
           set -e
@@ -242,6 +264,7 @@ jobs:
           ninja -C build
 
       - name: Package
+        if: matrix.build_mode != 'poudriere'
         shell: freebsd {0}
         run: |
           set -e
@@ -256,8 +279,35 @@ jobs:
           mv ./cpack_artifacts/Sunshine.pkg \
             ../artifacts/Sunshine-FreeBSD-${{ matrix.bsd_release }}-${{ matrix.cmake_processor }}.pkg
 
+      # EXPERIMENTAL (see matrix comment above): builds our actual FreeBSD
+      # ports-tree submission (poudriere + the real port Makefile/pkg-plist
+      # copied into .github/freebsd-port-experiment/) instead of Sunshine's
+      # own cmake/ninja/cpack CI flow, as a real timing comparison.
+      - name: Poudriere build (our actual FreeBSD port)
+        if: matrix.build_mode == 'poudriere'
+        shell: freebsd {0}
+        run: |
+          set -e
+
+          poudriere ports -c -p default -m git+https -U https://git.FreeBSD.org/ports.git
+          poudriere ports -c -p localoverlay -m null -M "${GITHUB_WORKSPACE}/.github/freebsd-port-experiment"
+
+          poudriere jail -c -j fbsdjail -v ${{ matrix.bsd_release }}-RELEASE -a ${{ matrix.arch }}.${{ matrix.arch }} -m http
+
+          # ALLOW_NETWORKING_PACKAGES must match the port's bare pkgname
+          # (${pkgname%-*}, i.e. "sunshine"), not its category/name origin
+          # ("multimedia/sunshine") -- a real bug we found and fixed in our
+          # own port work; see ffmpeg-build-deps-architecture-notes.md.
+          echo 'ALLOW_NETWORKING_PACKAGES=sunshine' >> /usr/local/etc/poudriere.conf
+
+          poudriere testport -j fbsdjail -p localoverlay -O localoverlay multimedia/sunshine
+
+          mkdir -p "${GITHUB_WORKSPACE}/artifacts"
+          find /usr/local/poudriere/data/packages -name 'sunshine-*.pkg' \
+            -exec cp {} "${GITHUB_WORKSPACE}/artifacts/Sunshine-FreeBSD-poudriere-${{ matrix.bsd_release }}-${{ matrix.cmake_processor }}.pkg" \;
+
       - name: Debug
-        if: always()
+        if: always() && matrix.build_mode != 'poudriere'
         shell: bash
         working-directory: build/cpack_artifacts/_CPack_Packages/FreeBSD/FREEBSD/Sunshine
         run: |
@@ -283,6 +333,7 @@ jobs:
 
       - name: Test
         id: test
+        if: matrix.build_mode != 'poudriere'
         shell: freebsd {0}
         run: |
           set -e

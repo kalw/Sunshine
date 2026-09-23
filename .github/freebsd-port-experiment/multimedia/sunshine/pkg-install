@@ -1,0 +1,19 @@
+#!/bin/sh
+if ! pw groupshow input >/dev/null 2>&1; then
+  pw groupadd input
+fi
+if [ -e /dev/uinput ]; then
+  chown root:input /dev/uinput
+  chmod 660 /dev/uinput
+fi
+DEVFS_RULESET_FILE="/etc/devfs.rules"
+RULESET_NUM=47989
+if ! grep -q "\[sunshine=$RULESET_NUM\]" "$DEVFS_RULESET_FILE" 2>/dev/null; then
+  [ -s "$DEVFS_RULESET_FILE" ] && echo >> "$DEVFS_RULESET_FILE"
+  cat >> "$DEVFS_RULESET_FILE" << INNEREOF
+[sunshine=$RULESET_NUM]
+add path 'uinput' mode 0660 group input
+INNEREOF
+fi
+[ -e /dev/uinput ] && devfs -m /dev rule -s $RULESET_NUM applyset
+echo "Run: pw groupmod input -m \$USER   (then log out/in)"

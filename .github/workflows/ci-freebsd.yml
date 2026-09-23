@@ -27,6 +27,10 @@ jobs:
       contents: read
     strategy:
       fail-fast: false
+      # EXPERIMENTAL: run the 4 timing-comparison entries one at a time
+      # instead of in parallel, so each gets isolated runner resources with
+      # zero cross-job interference -- not for merge.
+      max-parallel: 1
       matrix:
         include:
           - bsd_release: '15.1'

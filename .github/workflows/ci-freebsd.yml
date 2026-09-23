@@ -77,6 +77,14 @@ jobs:
           arch: ${{ matrix.arch }}
           cpu: ${{ steps.processor_count.outputs.PROCESSOR_COUNT }}
           envs: 'BRANCH BUILD_VERSION COMMIT PYTHON_VERSION'
+          # EXPERIMENTAL: cache the prepared VM image (post-prepare) so
+          # repeated iterations on this branch skip package installation
+          # entirely instead of re-running `prepare` from scratch every
+          # time -- see vmactions/vmactions-skill's SKILL.md, which calls
+          # this "the default choice, not an optimization to reach for
+          # later." Cache key hashes the prepare script + sync method, so
+          # it self-invalidates when either changes.
+          cache-after-prepare: true
           # TODO: there is no libcap for freebsd... we need graphics/libdrm if we find a way to use libcap
           prepare: |
             set -e

@@ -289,16 +289,24 @@ jobs:
         run: |
           set -e
 
+          # This CI VM has no ZFS pool; poudriere defaults to expecting one
+          # unless told otherwise. ALLOW_NETWORKING_PACKAGES must match the
+          # port's bare pkgname (${pkgname%-*}, i.e. "sunshine"), not its
+          # category/name origin ("multimedia/sunshine") -- a real bug we
+          # found and fixed in our own port work; see
+          # ffmpeg-build-deps-architecture-notes.md.
+          cat > /usr/local/etc/poudriere.conf <<-'EOF'
+          NO_ZFS=yes
+          BASEFS=/usr/local/poudriere
+          FREEBSD_HOST=ftp://ftp.freebsd.org
+          RESOLV_CONF=/etc/resolv.conf
+          ALLOW_NETWORKING_PACKAGES=sunshine
+          EOF
+
           poudriere ports -c -p default -m git+https -U https://git.FreeBSD.org/ports.git
           poudriere ports -c -p localoverlay -m null -M "${GITHUB_WORKSPACE}/.github/freebsd-port-experiment"
 
           poudriere jail -c -j fbsdjail -v ${{ matrix.bsd_release }}-RELEASE -a ${{ matrix.arch }}.${{ matrix.arch }} -m http
-
-          # ALLOW_NETWORKING_PACKAGES must match the port's bare pkgname
-          # (${pkgname%-*}, i.e. "sunshine"), not its category/name origin
-          # ("multimedia/sunshine") -- a real bug we found and fixed in our
-          # own port work; see ffmpeg-build-deps-architecture-notes.md.
-          echo 'ALLOW_NETWORKING_PACKAGES=sunshine' >> /usr/local/etc/poudriere.conf
 
           poudriere testport -j fbsdjail -p localoverlay -O localoverlay multimedia/sunshine
 

@@ -54,11 +54,13 @@ jobs:
           # is viable time-wise in this CI environment, both architectures.
           - bsd_release: '15.1'
             arch: x86_64
+            freebsd_target_arch: amd64
             cmake_processor: amd64-poudriere
             runner: ubuntu-latest
             build_mode: poudriere
           - bsd_release: '15.1'
             arch: aarch64
+            freebsd_target_arch: arm64
             cmake_processor: arm64-poudriere
             runner: ubuntu-latest
             build_mode: poudriere
@@ -306,7 +308,7 @@ jobs:
           poudriere ports -c -p default -m git+https -U https://git.FreeBSD.org/ports.git
           poudriere ports -c -p localoverlay -m null -M "${GITHUB_WORKSPACE}/.github/freebsd-port-experiment"
 
-          poudriere jail -c -j fbsdjail -v ${{ matrix.bsd_release }}-RELEASE -a ${{ matrix.arch }}.${{ matrix.arch }} -m http
+          poudriere jail -c -j fbsdjail -v ${{ matrix.bsd_release }}-RELEASE -a ${{ matrix.freebsd_target_arch }}.${{ matrix.arch }} -m http
 
           poudriere testport -j fbsdjail -p localoverlay -O localoverlay multimedia/sunshine
 

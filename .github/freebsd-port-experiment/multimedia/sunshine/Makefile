@@ -20,12 +20,7 @@ BUILD_DEPENDS=	clang19:devel/llvm19 \
 	${LOCALBASE}/include/boost/version.hpp:devel/boost-all \
 	glslc:graphics/shaderc \
 	${LOCALBASE}/include/vulkan/vulkan.h:graphics/vulkan-headers \
-	autoconf:devel/autoconf \
-	automake:devel/automake \
-	libtoolize:devel/libtool \
 	cmake:devel/cmake \
-	gmake:devel/gmake \
-	nasm:devel/nasm \
 	${LOCALBASE}/lib/libass.so:multimedia/libass \
 	${LOCALBASE}/lib/libv4l2.so:multimedia/libv4l \
 	${LOCALBASE}/include/linux/videodev2.h:multimedia/v4l_compat \
@@ -135,11 +130,16 @@ pre-configure:
 	@fetch -o ${WRKDIR}/pydeps/setuptools-84.0.0-py3-none-any.whl https://files.pythonhosted.org/packages/95/9c/c510029fc6ef33a6275cd2c5d3cecd6613dfd6aa401d57c54f1c18852ccf/setuptools-84.0.0-py3-none-any.whl
 	@${SETENV} UV_CACHE_DIR=${WRKDIR}/.uv-cache uv pip install --python ${LOCALBASE}/bin/python3.14 --target ${WRKDIR}/pylibs --no-index --find-links ${WRKDIR}/pydeps ${WRKDIR}/pydeps/jinja2-3.1.6-py3-none-any.whl ${WRKDIR}/pydeps/markupsafe-3.0.3.tar.gz
 	@${SETENV} PYTHONPATH=${WRKDIR}/pylibs ${LOCALBASE}/bin/python3.14 -c "import jinja2" || (echo "jinja2 still not importable" && exit 1)
-	@if [ ! -d ${BUILD_DEPS_DIR} ]; then ${SETENV} git clone --recurse-submodules https://github.com/LizardByte/build-deps.git ${BUILD_DEPS_DIR}; fi
-	@for f in `grep -rl '^#!/bin/bash$$' ${BUILD_DEPS_DIR} 2>/dev/null`; do ${REINPLACE_CMD} -e '1s|^#!/bin/bash$$|#!/usr/local/bin/bash|' $$f; done
+	# EXPERIMENT ONLY (not for the real port/ports-tree submission): fetch
+	# the last build-deps release that still published a FreeBSD/aarch64
+	# prebuilt archive (v2026.724.203728, 2026-07-25 -- build-deps#757
+	# dropped aarch64 after this) instead of compiling FFmpeg/x264/x265/
+	# SvtAv1Enc from source. Isolates poudriere's own mechanical overhead
+	# (jail/ports-tree setup, Sunshine's own compile+package) from the
+	# separate, already-understood cost of building FFmpeg itself from
+	# source, for both architectures.
 	@${MKDIR} ${BUILD_DEPS_DIST}
-	cd ${BUILD_DEPS_DIR} && ${SETENV} CC=${CC} CXX=${CXX} CCACHE_DIR=${WRKDIR}/.ccache cmake -B build -S . -G "Unix Makefiles" -DCMAKE_MAKE_PROGRAM=gmake -DCMAKE_INSTALL_PREFIX=${BUILD_DEPS_DIST} -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-	cd ${BUILD_DEPS_DIR} && ${SETENV} CCACHE_DIR=${WRKDIR}/.ccache gmake -C build
-	cd ${BUILD_DEPS_DIR} && gmake -C build install
+	@fetch -o ${WRKDIR}/build-deps-ffmpeg.tar.gz https://github.com/LizardByte/build-deps/releases/download/v2026.724.203728/FreeBSD-${ARCH}-ffmpeg.tar.gz
+	@tar -xzf ${WRKDIR}/build-deps-ffmpeg.tar.gz -C ${BUILD_DEPS_DIST}
 
 .include <bsd.port.mk>

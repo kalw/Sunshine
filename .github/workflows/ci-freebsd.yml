@@ -70,7 +70,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          submodules: recursive
+          # poudriere mode never touches Sunshine's own source tree -- it
+          # fetches Sunshine fresh from GitHub via the port's own
+          # USE_GITHUB/GH_TUPLE, independent of this checkout. Skip the
+          # (large) recursive submodule fetch entirely for those entries.
+          submodules: ${{ matrix.build_mode == 'poudriere' && 'false' || 'recursive' }}
 
       - name: Get Processor Count
         id: processor_count
@@ -318,7 +322,11 @@ jobs:
           ALLOW_NETWORKING_PACKAGES=sunshine
           EOF
 
-          poudriere ports -c -p default -m git+https -U https://git.FreeBSD.org/ports.git
+          # shallow clone ourselves (poudriere's own git method clones full
+          # history) -- the ports tree only needs current file state to
+          # build, not history, and this is by far the largest fetch here
+          git clone --depth 1 https://git.FreeBSD.org/ports.git /usr/local/poudriere/ports-src
+          poudriere ports -c -p default -m null -M /usr/local/poudriere/ports-src
           poudriere ports -c -p localoverlay -m null -M "${GITHUB_WORKSPACE}/.github/freebsd-port-experiment"
 
           poudriere jail -c -j fbsdjail -v ${{ matrix.bsd_release }}-RELEASE -a ${{ matrix.freebsd_target_arch }}.${{ matrix.freebsd_machine_arch }} -m http

@@ -331,7 +331,7 @@ jobs:
 
           poudriere jail -c -j fbsdjail -v ${{ matrix.bsd_release }}-RELEASE -a ${{ matrix.freebsd_target_arch }}.${{ matrix.freebsd_machine_arch }} -m http
 
-          poudriere testport -j fbsdjail -p localoverlay -O localoverlay multimedia/sunshine
+          poudriere testport -j fbsdjail -p default -O localoverlay multimedia/sunshine
 
           mkdir -p "${GITHUB_WORKSPACE}/artifacts"
           find /usr/local/poudriere/data/packages -name 'sunshine-*.pkg' \

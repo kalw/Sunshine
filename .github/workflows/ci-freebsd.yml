@@ -102,7 +102,7 @@ jobs:
               # its isolated jail, straight from the port's own
               # BUILD_DEPENDS/LIB_DEPENDS/RUN_DEPENDS -- none of Sunshine's
               # direct build dependencies below are needed on the host VM.
-              pkg install -y ports-mgmt/poudriere
+              pkg install -y ports-mgmt/poudriere devel/git
             else
               pkg install -y \
                 audio/opus \

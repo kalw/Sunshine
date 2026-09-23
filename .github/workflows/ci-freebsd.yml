@@ -92,89 +92,97 @@ jobs:
 
             pkg update
             pkg upgrade -y
-            pkg install -y \
-              audio/opus \
-              audio/pulseaudio \
-              devel/boost-all \
-              devel/cmake-core \
-              devel/doxygen \
-              devel/evdev-proto \
-              devel/git \
-              devel/libevdev \
-              devel/llvm${{ env.FREEBSD_CLANG_VERSION }} \
-              devel/ninja \
-              devel/pkgconf \
-              devel/uv \
-              devel/qt6-base \
-              ftp/curl \
-              graphics/graphviz \
-              graphics/libdrm \
-              graphics/qt6-svg \
-              graphics/shaderc \
-              graphics/vulkan-headers \
-              graphics/vulkan-loader \
-              graphics/wayland \
-              lang/python314 \
-              multimedia/libva \
-              multimedia/pipewire \
-              net/miniupnpc \
-              ports-mgmt/pkg \
-              security/openssl \
-              shells/bash \
-              www/npm-node22 \
-              x11/libX11 \
-              x11/libxcb \
-              x11/libXfixes \
-              x11/libXrandr \
-              x11/libXtst \
-              x11-servers/xorg-server
-
-            if [ "${{ matrix.build_mode }}" = "source" ]; then
-              # extra build tooling only needed to compile LizardByte/build-deps
-              # (FFmpeg + x264/x265/SvtAv1Enc) from source ourselves, since no
-              # prebuilt FreeBSD/aarch64 archive is currently published
-              pkg install -y \
-                devel/autoconf \
-                devel/automake \
-                devel/gmake \
-                devel/libtool \
-                devel/nasm
-            fi
 
             if [ "${{ matrix.build_mode }}" = "poudriere" ]; then
+              # poudriere builds Sunshine's own dependencies itself, inside
+              # its isolated jail, straight from the port's own
+              # BUILD_DEPENDS/LIB_DEPENDS/RUN_DEPENDS -- none of Sunshine's
+              # direct build dependencies below are needed on the host VM.
               pkg install -y ports-mgmt/poudriere
+            else
+              pkg install -y \
+                audio/opus \
+                audio/pulseaudio \
+                devel/boost-all \
+                devel/cmake-core \
+                devel/doxygen \
+                devel/evdev-proto \
+                devel/git \
+                devel/libevdev \
+                devel/llvm${{ env.FREEBSD_CLANG_VERSION }} \
+                devel/ninja \
+                devel/pkgconf \
+                devel/uv \
+                devel/qt6-base \
+                ftp/curl \
+                graphics/graphviz \
+                graphics/libdrm \
+                graphics/qt6-svg \
+                graphics/shaderc \
+                graphics/vulkan-headers \
+                graphics/vulkan-loader \
+                graphics/wayland \
+                lang/python314 \
+                multimedia/libva \
+                multimedia/pipewire \
+                net/miniupnpc \
+                ports-mgmt/pkg \
+                security/openssl \
+                shells/bash \
+                www/npm-node22 \
+                x11/libX11 \
+                x11/libxcb \
+                x11/libXfixes \
+                x11/libXrandr \
+                x11/libXtst \
+                x11-servers/xorg-server
+
+              if [ "${{ matrix.build_mode }}" = "source" ]; then
+                # extra build tooling only needed to compile LizardByte/build-deps
+                # (FFmpeg + x264/x265/SvtAv1Enc) from source ourselves, since no
+                # prebuilt FreeBSD/aarch64 archive is currently published
+                pkg install -y \
+                  devel/autoconf \
+                  devel/automake \
+                  devel/gmake \
+                  devel/libtool \
+                  devel/nasm
+              fi
+
+              # create symlink for shebang bash compatibility
+              ln -s /usr/local/bin/bash /bin/bash
+
+              # setup python
+              ln -s /usr/local/bin/python3.14 /usr/local/bin/python
             fi
-
-            # create symlink for shebang bash compatibility
-            ln -s /usr/local/bin/bash /bin/bash
-
-            # setup python
-            ln -s /usr/local/bin/python3.14 /usr/local/bin/python
           release: ${{ matrix.bsd_release }}
           run: |
             set -e
-            # Keep FreeBSD off Sunshine's default dependency path: lizardbyte-common[c]
-            # includes clang-format, which has no FreeBSD wheel and is slow to build.
-            set -- \
-              --locked \
-              --only-group glad \
-              --python "/usr/local/bin/python${PYTHON_VERSION}" \
-              --no-python-downloads \
-              --no-install-project
-            # uv.lock pins external artifacts; the reviewed vendored glad2 build hook is required.
-            uv sync "$@"  # NOSONAR(githubactions:S8541, githubactions:S8544)
-            set -- \
-              --project third-party/lizardbyte-common \
-              --locked \
-              --only-group test-c \
-              --python "/usr/local/bin/python${PYTHON_VERSION}" \
-              --no-python-downloads \
-              --no-install-project
-            # uv.lock pins the source artifact; FreeBSD must build lxml because no wheel is available.
-            uv sync "$@"  # NOSONAR(githubactions:S8541, githubactions:S8544)
 
             # fix git safe.directory issues
             git config --global --add safe.directory "*"
+
+            if [ "${{ matrix.build_mode }}" != "poudriere" ]; then
+              # Keep FreeBSD off Sunshine's default dependency path: lizardbyte-common[c]
+              # includes clang-format, which has no FreeBSD wheel and is slow to build.
+              set -- \
+                --locked \
+                --only-group glad \
+                --python "/usr/local/bin/python${PYTHON_VERSION}" \
+                --no-python-downloads \
+                --no-install-project
+              # uv.lock pins external artifacts; the reviewed vendored glad2 build hook is required.
+              uv sync "$@"  # NOSONAR(githubactions:S8541, githubactions:S8544)
+              set -- \
+                --project third-party/lizardbyte-common \
+                --locked \
+                --only-group test-c \
+                --python "/usr/local/bin/python${PYTHON_VERSION}" \
+                --no-python-downloads \
+                --no-install-project
+              # uv.lock pins the source artifact; FreeBSD must build lxml because no wheel is available.
+              uv sync "$@"  # NOSONAR(githubactions:S8541, githubactions:S8544)
+            fi
           sync: nfs  # sshfs is used for build-deps; however it's much slower than nfs
 
       # EXPERIMENTAL (see matrix comment above): LizardByte/build-deps no

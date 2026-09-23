@@ -27,29 +27,12 @@ jobs:
       contents: read
     strategy:
       fail-fast: false
-      # EXPERIMENTAL: run the 4 timing-comparison entries one at a time
-      # instead of in parallel, so each gets isolated runner resources with
-      # zero cross-job interference -- not for merge.
-      max-parallel: 1
+      # EXPERIMENTAL: only the two poudriere entries remain (existing-style
+      # prebuilt/source entries dropped), run in parallel against each
+      # other -- isolating just the poudriere-vs-poudriere amd64/arm64
+      # comparison, not for merge.
       matrix:
         include:
-          - bsd_release: '15.1'
-            arch: x86_64
-            cmake_processor: amd64
-            runner: ubuntu-latest
-            build_mode: prebuilt
-          # EXPERIMENTAL: aarch64 was dropped from LizardByte/build-deps'
-          # prebuilt FFmpeg releases (build-deps#757) for being too slow
-          # under nested QEMU virtualization. This entry builds FFmpeg (and
-          # x264/x265/SvtAv1Enc) from source directly in this job instead of
-          # relying on a build-deps prebuilt archive, to get a real timing
-          # measurement of whether aarch64 is viable at all in this exact CI
-          # environment. See the "Build FFmpeg from source" step below.
-          - bsd_release: '15.1'
-            arch: aarch64
-            cmake_processor: arm64
-            runner: ubuntu-latest
-            build_mode: source
           # EXPERIMENTAL: build via the actual FreeBSD ports-tree submission
           # (poudriere + the real port Makefile/pkg-plist, copied into
           # .github/freebsd-port-experiment/multimedia/sunshine for this

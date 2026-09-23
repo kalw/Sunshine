@@ -205,15 +205,15 @@ jobs:
           export CC="${cc_path}"
           export CXX="${cxx_path}"
 
-          cmake_extra_args=()
+          cmake_extra_args=""
           if [ -n "${FFMPEG_PREPARED_BINARIES:-}" ]; then
-            cmake_extra_args+=("-DFFMPEG_PREPARED_BINARIES=${FFMPEG_PREPARED_BINARIES}")
+            cmake_extra_args="-DFFMPEG_PREPARED_BINARIES=${FFMPEG_PREPARED_BINARIES}"
           fi
 
           mkdir -p build
           cmake \
             -B build \
-            "${cmake_extra_args[@]}" \
+            ${cmake_extra_args} \
             -G Ninja \
             -S . \
             -DBUILD_DOCS=ON \

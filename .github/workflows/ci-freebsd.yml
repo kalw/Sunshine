@@ -33,6 +33,19 @@ jobs:
             arch: x86_64
             cmake_processor: amd64
             runner: ubuntu-latest
+            build_ffmpeg_from_source: false
+          # EXPERIMENTAL: aarch64 was dropped from LizardByte/build-deps'
+          # prebuilt FFmpeg releases (build-deps#757) for being too slow
+          # under nested QEMU virtualization. This entry builds FFmpeg (and
+          # x264/x265/SvtAv1Enc) from source directly in this job instead of
+          # relying on a build-deps prebuilt archive, to get a real timing
+          # measurement of whether aarch64 is viable at all in this exact CI
+          # environment. See the "Build FFmpeg from source" step below.
+          - bsd_release: '15.1'
+            arch: aarch64
+            cmake_processor: arm64
+            runner: ubuntu-latest
+            build_ffmpeg_from_source: true
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -96,6 +109,18 @@ jobs:
               x11/libXtst \
               x11-servers/xorg-server
 
+            if [ "${{ matrix.build_ffmpeg_from_source }}" = "true" ]; then
+              # extra build tooling only needed to compile LizardByte/build-deps
+              # (FFmpeg + x264/x265/SvtAv1Enc) from source ourselves, since no
+              # prebuilt FreeBSD/aarch64 archive is currently published
+              pkg install -y \
+                devel/autoconf \
+                devel/automake \
+                devel/gmake \
+                devel/libtool \
+                devel/nasm
+            fi
+
             # create symlink for shebang bash compatibility
             ln -s /usr/local/bin/bash /bin/bash
 
@@ -128,6 +153,46 @@ jobs:
             git config --global --add safe.directory "*"
           sync: nfs  # sshfs is used for build-deps; however it's much slower than nfs
 
+      # EXPERIMENTAL (see matrix comment above): LizardByte/build-deps no
+      # longer publishes a prebuilt FreeBSD/aarch64 FFmpeg archive
+      # (build-deps#757, dropped for being slow under nested QEMU
+      # virtualization on GH-hosted runners). This step builds it from
+      # source instead, as a real timing measurement of whether that's
+      # actually true end-to-end in this exact CI environment, using the
+      # same build-deps CMake project upstream's own release process uses.
+      - name: Build FFmpeg from source (aarch64 experiment)
+        if: matrix.build_ffmpeg_from_source
+        shell: freebsd {0}
+        run: |
+          set -e
+
+          cc_path="$(which clang${{ env.FREEBSD_CLANG_VERSION }})"
+          cxx_path="$(which clang++${{ env.FREEBSD_CLANG_VERSION }})"
+
+          build_deps_dir="${GITHUB_WORKSPACE}/../build-deps"
+          build_deps_dist="${GITHUB_WORKSPACE}/../build-deps-dist"
+
+          git clone --recurse-submodules --depth 1 \
+            https://github.com/LizardByte/build-deps.git "${build_deps_dir}"
+
+          # some build-deps scripts assume Linux's /bin/bash
+          for f in $(grep -rl '^#!/bin/bash$' "${build_deps_dir}" 2>/dev/null); do
+            sed -i '' "1s|^#!/bin/bash\$|#!/usr/local/bin/bash|" "$f"
+          done
+
+          cmake \
+            -B "${build_deps_dir}/build" \
+            -S "${build_deps_dir}" \
+            -G "Unix Makefiles" \
+            -DCMAKE_C_COMPILER="${cc_path}" \
+            -DCMAKE_CXX_COMPILER="${cxx_path}" \
+            -DCMAKE_MAKE_PROGRAM=gmake \
+            -DCMAKE_INSTALL_PREFIX="${build_deps_dist}"
+          gmake -C "${build_deps_dir}/build"
+          gmake -C "${build_deps_dir}/build" install
+
+          echo "FFMPEG_PREPARED_BINARIES=${build_deps_dist}/ffmpeg" >> "${GITHUB_ENV}"
+
       - name: Configure
         shell: freebsd {0}
         run: |
@@ -140,9 +205,15 @@ jobs:
           export CC="${cc_path}"
           export CXX="${cxx_path}"
 
+          cmake_extra_args=()
+          if [ -n "${FFMPEG_PREPARED_BINARIES:-}" ]; then
+            cmake_extra_args+=("-DFFMPEG_PREPARED_BINARIES=${FFMPEG_PREPARED_BINARIES}")
+          fi
+
           mkdir -p build
           cmake \
             -B build \
+            "${cmake_extra_args[@]}" \
             -G Ninja \
             -S . \
             -DBUILD_DOCS=ON \

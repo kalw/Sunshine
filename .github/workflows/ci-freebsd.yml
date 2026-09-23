@@ -299,9 +299,12 @@ jobs:
           # category/name origin ("multimedia/sunshine") -- a real bug we
           # found and fixed in our own port work; see
           # ffmpeg-build-deps-architecture-notes.md.
+          mkdir -p /usr/local/poudriere/distfiles
+
           cat > /usr/local/etc/poudriere.conf <<-'EOF'
           NO_ZFS=yes
           BASEFS=/usr/local/poudriere
+          DISTFILES_CACHE=/usr/local/poudriere/distfiles
           FREEBSD_HOST=ftp://ftp.freebsd.org
           RESOLV_CONF=/etc/resolv.conf
           ALLOW_NETWORKING_PACKAGES=sunshine

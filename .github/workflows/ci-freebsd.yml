@@ -328,6 +328,12 @@ jobs:
           FREEBSD_HOST=ftp://ftp.freebsd.org
           RESOLV_CONF=/etc/resolv.conf
           ALLOW_NETWORKING_PACKAGES=sunshine
+          # Fetch existing binary packages from FreeBSD's own official repo
+          # instead of building every one of ~500 dependencies from source
+          # on this cold, ephemeral jail. Requires -b matching this branch
+          # on the testport invocation below to actually take effect.
+          PACKAGE_FETCH_BRANCH=latest
+          PACKAGE_FETCH_URL=pkg+http://pkg.FreeBSD.org/${ABI}
           EOF
 
           # shallow clone ourselves (poudriere's own git method clones full
@@ -339,7 +345,7 @@ jobs:
 
           poudriere jail -c -j fbsdjail -v ${{ matrix.bsd_release }}-RELEASE -a ${{ matrix.freebsd_target_arch }}.${{ matrix.freebsd_machine_arch }} -m http
 
-          poudriere testport -j fbsdjail -p default -O localoverlay multimedia/sunshine
+          poudriere testport -b latest -j fbsdjail -p default -O localoverlay multimedia/sunshine
 
           mkdir -p "${GITHUB_WORKSPACE}/artifacts"
           find /usr/local/poudriere/data/packages -name 'sunshine-*.pkg' \

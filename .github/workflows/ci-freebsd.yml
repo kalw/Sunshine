@@ -332,20 +332,28 @@ jobs:
           # instead of building every one of ~500 dependencies from source
           # on this cold, ephemeral jail. Requires -b matching this branch
           # on the testport invocation below to actually take effect.
-          PACKAGE_FETCH_BRANCH=latest
+          #
+          # quarterly (not latest): the quarterly repo is a frozen snapshot
+          # cut once per quarter and never changes; latest rebuilds weekly
+          # from HEAD, so it's only ever "close" to whatever our ports tree
+          # clone's exact commit is, not an exact match. Pinning our own
+          # ports tree checkout to the same quarterly branch below gets an
+          # exact match against every official package instead of a
+          # close-but-not-identical one, maximizing the fetch-hit rate.
+          PACKAGE_FETCH_BRANCH=quarterly
           PACKAGE_FETCH_URL=pkg+http://pkg.FreeBSD.org/${ABI}
           EOF
 
-          # shallow clone ourselves (poudriere's own git method clones full
-          # history) -- the ports tree only needs current file state to
-          # build, not history, and this is by far the largest fetch here
-          git clone --depth 1 https://git.FreeBSD.org/ports.git /usr/local/poudriere/ports-src
+          # shallow clone at the current quarterly branch (not HEAD) to
+          # exactly match the quarterly package repo above -- see comment
+          # on PACKAGE_FETCH_BRANCH.
+          git clone --depth 1 --branch 2026Q3 https://git.FreeBSD.org/ports.git /usr/local/poudriere/ports-src
           poudriere ports -c -p default -m null -M /usr/local/poudriere/ports-src
           poudriere ports -c -p localoverlay -m null -M "${GITHUB_WORKSPACE}/.github/freebsd-port-experiment"
 
           poudriere jail -c -j fbsdjail -v ${{ matrix.bsd_release }}-RELEASE -a ${{ matrix.freebsd_target_arch }}.${{ matrix.freebsd_machine_arch }} -m http
 
-          poudriere testport -b latest -j fbsdjail -p default -O localoverlay multimedia/sunshine
+          poudriere testport -b quarterly -j fbsdjail -p default -O localoverlay multimedia/sunshine
 
           mkdir -p "${GITHUB_WORKSPACE}/artifacts"
           find /usr/local/poudriere/data/packages -name 'sunshine-*.pkg' \

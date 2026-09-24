@@ -341,7 +341,15 @@ jobs:
           # exact match against every official package instead of a
           # close-but-not-identical one, maximizing the fetch-hit rate.
           PACKAGE_FETCH_BRANCH=quarterly
-          PACKAGE_FETCH_URL=pkg+http://pkg.FreeBSD.org/${ABI}
+          # poudriere.conf.sample's own PACKAGE_FETCH_URL example uses a
+          # literal \${ABI} placeholder, but poudriere never actually sets
+          # a shell variable named ABI anywhere (confirmed against its own
+          # common.sh source) -- it silently expands to empty, producing a
+          # broken double-slash URL (pkg.FreeBSD.org//quarterly) that
+          # "Package fetch: Not fetching as remote repository is
+          # unavailable" was the visible symptom of. Hardcode the real,
+          # verified-reachable ABI string per architecture instead.
+          PACKAGE_FETCH_URL=pkg+http://pkg.FreeBSD.org/FreeBSD:15:${{ matrix.freebsd_machine_arch }}
           EOF
 
           # shallow clone at the current quarterly branch (not HEAD) to

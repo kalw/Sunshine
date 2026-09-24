@@ -368,12 +368,15 @@ jobs:
           # the bootstrap tool), so any fetched package depending on pkg --
           # cmake-core, then cmake -- fails the repo sanity check and gets
           # rebuilt (~18 min for cmake-core alone). Seed the official pkg
-          # package into the repo up front so they're kept as fetched.
-          pkgrepo=/usr/local/poudriere/data/packages/fbsdjail-default/All
-          mkdir -p "${pkgrepo}"
+          # package into the repo up front so they're kept as fetched. Repo
+          # creation extracts pkg-static from Latest/pkg.pkg (a link poudriere
+          # only makes for packages it builds), so create that link too.
+          pkgrepo=/usr/local/poudriere/data/packages/fbsdjail-default
+          mkdir -p "${pkgrepo}/All" "${pkgrepo}/Latest"
           fetch -o /tmp/pkg.pkg "https://pkg.FreeBSD.org/FreeBSD:15:${{ matrix.freebsd_machine_arch }}/quarterly/Latest/pkg.pkg"
           pkgname=$(pkg query -F /tmp/pkg.pkg '%n-%v')
-          cp /tmp/pkg.pkg "${pkgrepo}/${pkgname}.pkg"
+          cp /tmp/pkg.pkg "${pkgrepo}/All/${pkgname}.pkg"
+          ln -sf "../All/${pkgname}.pkg" "${pkgrepo}/Latest/pkg.pkg"
           echo "Seeded ${pkgname}.pkg into ${pkgrepo}"
 
           # bulk -t runs the same QA as testport (plist, leftovers,

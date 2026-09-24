@@ -14,7 +14,6 @@ BUILD_DEPENDS=	clang19:devel/llvm19 \
 	git:devel/git \
 	bash:shells/bash \
 	ninja:devel/ninja \
-	ccache:devel/ccache \
 	uv:devel/uv \
 	npm:www/npm-node22 \
 	${LOCALBASE}/include/boost/version.hpp:devel/boost-all \
@@ -92,12 +91,6 @@ BUILD_DEPS_DIST=	${BUILD_DEPS_DIR}/build/dist
 CONFIGURE_ENV+=	PYTHONPATH=${WRKDIR}/pylibs
 MAKE_ENV+=	PYTHONPATH=${WRKDIR}/pylibs
 
-# ccache defaults to $HOME/.ccache, which is unwritable when the builder user
-# is nobody (HOME=/nonexistent). Point it at WRKDIR instead of relying on a
-# builder-host-specific CCACHE_DIR in poudriere.conf.
-CONFIGURE_ENV+=	CCACHE_DIR=${WRKDIR}/.ccache
-MAKE_ENV+=	CCACHE_DIR=${WRKDIR}/.ccache
-
 CMAKE_ARGS+=	-DBUILD_DOCS=OFF \
 	-DBUILD_TESTS=OFF \
 	-DBUILD_WERROR=OFF \
@@ -110,8 +103,6 @@ CMAKE_ARGS+=	-DBUILD_DOCS=OFF \
 	-DSUNSHINE_ENABLE_WAYLAND=ON \
 	-DSUNSHINE_ENABLE_X11=ON \
 	-DSUNSHINE_SYSTEM_VULKAN_HEADERS=ON \
-	-DCMAKE_C_COMPILER_LAUNCHER=ccache \
-	-DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
 	-DFFMPEG_PREPARED_BINARIES=${BUILD_DEPS_DIST}/ffmpeg
 
 post-patch:
@@ -144,5 +135,18 @@ pre-configure:
 	@${MKDIR} ${BUILD_DEPS_DIST}
 	@fetch -o ${WRKDIR}/build-deps-ffmpeg.tar.gz https://github.com/LizardByte/build-deps/releases/download/v2026.724.203728/FreeBSD-${ARCH}-ffmpeg.tar.gz
 	@tar -xzf ${WRKDIR}/build-deps-ffmpeg.tar.gz -C ${BUILD_DEPS_DIST}
+
+# EXPERIMENT ONLY (CI, aarch64): under QEMU emulation Node crashes in the
+# web UI's vite/rolldown(wasm) build. The web UI is architecture-independent,
+# so CI builds it natively on the runner (same sources and edits as
+# post-patch above) and drops it in files/. When present, make the web-ui
+# target's npm calls no-ops and install that output instead.
+.if exists(${FILESDIR}/webui-prebuilt.tar.gz)
+CMAKE_ARGS+=	-DNPM=/usr/bin/true
+
+post-configure:
+	@${MKDIR} ${BUILD_WRKSRC}/assets
+	@${TAR} -xzf ${FILESDIR}/webui-prebuilt.tar.gz -C ${BUILD_WRKSRC}/assets
+.endif
 
 .include <bsd.port.mk>

@@ -162,6 +162,38 @@ jobs:
           chmod +x "${wrap}/qemu-system-aarch64"
           echo "${wrap}" >> "${GITHUB_PATH}"
 
+      # Node crashes in the web UI's vite build under QEMU aarch64 emulation
+      # (V8 "Check failed ... StartOfJitAllocationAt", then a plain segfault,
+      # both in rolldown's wasm transform). The web UI is architecture-
+      # independent: build it natively here from the port's own distfile with
+      # the port's post-patch edits, and hand it to the experiment port via
+      # files/ (the overlay is NFS-mounted into the build jail). CI-only.
+      - name: Setup Node (aarch64 web UI)
+        if: matrix.build_mode == 'poudriere' && matrix.arch == 'aarch64'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: '22'
+
+      - name: Build web UI natively (aarch64)
+        if: matrix.build_mode == 'poudriere' && matrix.arch == 'aarch64'
+        shell: bash
+        run: |
+          port="${GITHUB_WORKSPACE}/.github/freebsd-port-experiment/multimedia/sunshine"
+          ver=$(awk '/^DISTVERSION=/ { print $2 }' "${port}/Makefile")
+          src="${RUNNER_TEMP}/sunshine-src"
+          out="${RUNNER_TEMP}/sunshine-webui"
+          mkdir -p "${src}" "${out}" "${port}/files"
+          curl -fsSL "https://codeload.github.com/LizardByte/Sunshine/tar.gz/refs/tags/v${ver}" |
+            tar -xz --strip-components 1 -C "${src}"
+          cd "${src}"
+          # Same edits as the port's post-patch.
+          sed -i 's|outDir: resolve(assetsDstPath),|outDir: resolve(assetsDstPath), cssMinify: "esbuild",|' vite.config.js
+          npm install --ignore-scripts
+          npm install --no-save esbuild
+          SUNSHINE_SOURCE_ASSETS_DIR="${src}/src_assets" SUNSHINE_ASSETS_DIR="${out}" npm run build
+          tar -czf "${port}/files/webui-prebuilt.tar.gz" -C "${out}/assets" web
+          tar -tzf "${port}/files/webui-prebuilt.tar.gz" | grep -c . | sed 's/^/web UI files: /'
+
       - name: Setup FreeBSD
         uses: vmactions/freebsd-vm@4469451fe39bee80be4066836c5170362e9349f3  # v1.5.7
         with:

@@ -1,0 +1,6 @@
+Sunshine is a self-hosted game stream host for Moonlight, capable of
+capturing and streaming an X11 or Wayland desktop (and, where supported,
+GPU-accelerated game content) over the network to any Moonlight client.
+It acts as an alternative to NVIDIA GameStream, supporting AMD, Intel and
+Nvidia GPUs as well as software encoding, with a browser-based web UI for
+configuration and pairing.

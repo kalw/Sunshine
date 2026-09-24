@@ -1,0 +1,14 @@
+#!/bin/sh
+DEVFS_RULESET_FILE="/etc/devfs.rules"
+RULESET_NUM=47989
+if [ -f "$DEVFS_RULESET_FILE" ]; then
+  if grep -q "\[sunshine=$RULESET_NUM\]" "$DEVFS_RULESET_FILE"; then
+    sed -i '' -e '/^\[sunshine='"$RULESET_NUM"'\]$/,/^add path.*uinput/d' "$DEVFS_RULESET_FILE"
+    sed -i '' -e '${/^$/d;}' "$DEVFS_RULESET_FILE"
+  fi
+  if ! grep -q '[^[:space:]]' "$DEVFS_RULESET_FILE" 2>/dev/null; then
+    rm -f "$DEVFS_RULESET_FILE"
+  fi
+fi
+devfs rule -s $RULESET_NUM delset 2>/dev/null || true
+echo "The 'input' group was left in place (other software may use it)."

@@ -23,21 +23,51 @@ jobs:
   build_freebsd:
     name: ${{ matrix.cmake_processor }}
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ matrix.timeout_minutes }}
     permissions:
       contents: read
     strategy:
       fail-fast: false
+      # arm64 runs under QEMU TCG emulation: every poudriere phase is
+      # 10-20x slower than amd64 (~2.5h vs ~11 min measured). Build it only
+      # on pushes to master, or on PRs labelled "freebsd-arm64"; amd64 runs
+      # on every PR.
+      #
+      # The entry list is built by an expression because a matrix `exclude`
+      # can't drop an include-only entry (and `include` is re-applied after
+      # `exclude` anyway). Entries (EXPERIMENTAL: poudriere + the real port
+      # copied into .github/freebsd-port-experiment, not for merge):
+      #   amd64: timeout 45 min (measured ~11-14 min)
+      #   arm64: timeout 330 min (measured ~2.5h before --jitless; cap 360)
       matrix:
-        include:
-          - bsd_release: '15.1'
-            arch: x86_64
-            cmake_processor: amd64
-            runner: ubuntu-latest
+        include: >-
+          ${{ fromJSON(format('[{0}{1}]',
+          '{"bsd_release":"15.1","arch":"x86_64","freebsd_target_arch":"amd64","freebsd_machine_arch":"amd64","cmake_processor":"amd64-poudriere","runner":"ubuntu-latest","build_mode":"poudriere","timeout_minutes":45}',
+          (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'freebsd-arm64')) &&
+          ',{"bsd_release":"15.1","arch":"aarch64","freebsd_target_arch":"arm64","freebsd_machine_arch":"aarch64","cmake_processor":"arm64-poudriere","runner":"ubuntu-latest","build_mode":"poudriere","timeout_minutes":330}' || ''
+          )) }}
     steps:
+      # EXPERIMENTAL: amd64-poudriere failed with "No space left on device"
+      # once cache-after-prepare was added -- the cached VM image, FreeBSD
+      # base image, full ports tree, and poudriere's ~500 dependency
+      # packages together exceeded ubuntu-latest's default disk. Reuse the
+      # same fix Sunshine's own build-docker job already uses for the same
+      # class of problem (see .github/workflows/ci.yml's build-docker /
+      # LizardByte/.github's __call-docker.yml).
+      - name: More space
+        uses: LizardByte/actions/actions/more_space@39c468549cfb87ccb917e5e5342e18abc926dc48  # v2026.909.30231
+        with:
+          analyze-space-savings: true
+          clean-all: true
+
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          submodules: recursive
+          # poudriere mode never touches Sunshine's own source tree -- it
+          # fetches Sunshine fresh from GitHub via the port's own
+          # USE_GITHUB/GH_TUPLE, independent of this checkout. Skip the
+          # (large) recursive submodule fetch entirely for those entries.
+          submodules: ${{ matrix.build_mode == 'poudriere' && 'false' || 'recursive' }}
 
       - name: Get Processor Count
         id: processor_count
@@ -47,88 +77,302 @@ jobs:
           echo "PROCESSOR_COUNT=${PROCESSOR_COUNT}" >> "${GITHUB_OUTPUT}"
           echo "PROCESSOR_COUNT: $PROCESSOR_COUNT"
 
+      # Materializing the ports tree inside the VM means creating ~170k files
+      # there, which is slow under aarch64 emulation (git clone ~8 min, plain
+      # untar still minutes). Resolve the quarterly branch head natively on
+      # the host, cache a zstd tarball of exactly that commit keyed on its
+      # SHA, and extract it on the host into the workspace; the VM reads it
+      # over the workspace NFS mount, so it creates no ports-tree files.
+      - name: Resolve ports tree commit
+        id: ports_tree
+        if: matrix.build_mode == 'poudriere'
+        shell: bash
+        run: |
+          branch=2026Q3
+          sha=$(git ls-remote https://github.com/freebsd/freebsd-ports.git "refs/heads/${branch}" | cut -f1)
+          echo "branch=${branch}" >> "${GITHUB_OUTPUT}"
+          echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
+          echo "ports ${branch} at ${sha}"
+
+      - name: Cache ports tree tarball
+        id: ports_cache
+        if: matrix.build_mode == 'poudriere'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: .ports-cache
+          key: freebsd-ports-${{ steps.ports_tree.outputs.sha }}
+
+      - name: Fetch ports tree tarball
+        if: matrix.build_mode == 'poudriere' && steps.ports_cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          mkdir -p .ports-cache
+          curl -fsSL "https://codeload.github.com/freebsd/freebsd-ports/tar.gz/${{ steps.ports_tree.outputs.sha }}" |
+            gzip -d | zstd -q -T0 -3 -o .ports-cache/ports.tar.zst
+          ls -l .ports-cache
+
+      - name: Extract ports tree
+        if: matrix.build_mode == 'poudriere'
+        shell: bash
+        run: |
+          mkdir -p .ports-tree
+          time tar --zstd -xf .ports-cache/ports.tar.zst --strip-components 1 -C .ports-tree
+          echo "Extracted ports ${{ steps.ports_tree.outputs.branch }} at ${{ steps.ports_tree.outputs.sha }}"
+
+      # Packages poudriere fetched on a previous run, keyed per arch and
+      # ports-tree commit; any older set is still useful (poudriere keeps
+      # what's current and refetches the rest). Skips the package fetch
+      # loops: ~25 min under arm64 emulation.
+      - name: Restore poudriere package cache
+        id: pkgs_cache
+        if: matrix.build_mode == 'poudriere'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: .poudriere-pkgs
+          key: poudriere-pkgs-${{ matrix.freebsd_machine_arch }}-${{ steps.ports_tree.outputs.sha }}
+          restore-keys: |
+            poudriere-pkgs-${{ matrix.freebsd_machine_arch }}-
+
+      # FreeBSD's arm64 kernel and base userland use pointer authentication
+      # everywhere, and anyvm boots this guest on `-cpu max`, whose default
+      # PAC algorithm (QARMA5) is very expensive under TCG. QEMU's
+      # implementation-defined algorithm is transparent to the guest and far
+      # cheaper to emulate. freebsd-vm has no cpu-type input, so wrap the
+      # binary anyvm finds on PATH.
+      - name: Use cheap PAC emulation for the aarch64 VM
+        if: matrix.arch == 'aarch64'
+        shell: bash
+        run: |
+          wrap="${RUNNER_TEMP}/qemu-wrap"
+          mkdir -p "${wrap}"
+          cat > "${wrap}/qemu-system-aarch64" <<'EOF'
+          #!/bin/bash
+          args=()
+          prev=
+          for a in "$@"; do
+            if [ "${prev}" = "-cpu" ] && [ "${a}" = "max" ]; then
+              a="max,pauth-impdef=on"
+            fi
+            args+=("${a}")
+            prev="${a}"
+          done
+          echo "qemu-system-aarch64 ${args[*]}" >> "${RUNNER_TEMP}/qemu-wrap.log"
+          exec /usr/bin/qemu-system-aarch64 "${args[@]}"
+          EOF
+          chmod +x "${wrap}/qemu-system-aarch64"
+          echo "${wrap}" >> "${GITHUB_PATH}"
+
+      # Node crashes in the web UI's vite build under QEMU aarch64 emulation
+      # (V8 "Check failed ... StartOfJitAllocationAt", then a plain segfault,
+      # both in rolldown's wasm transform). The web UI is architecture-
+      # independent: build it natively here from the port's own distfile with
+      # the port's post-patch edits, and hand it to the experiment port via
+      # files/ (the overlay is NFS-mounted into the build jail). CI-only.
+      - name: Setup Node (aarch64 web UI)
+        if: matrix.build_mode == 'poudriere' && matrix.arch == 'aarch64'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: '22'
+
+      - name: Build web UI natively (aarch64)
+        if: matrix.build_mode == 'poudriere' && matrix.arch == 'aarch64'
+        shell: bash
+        run: |
+          port="${GITHUB_WORKSPACE}/.github/freebsd-port-experiment/multimedia/sunshine"
+          ver=$(awk '/^DISTVERSION=/ { print $2 }' "${port}/Makefile")
+          src="${RUNNER_TEMP}/sunshine-src"
+          out="${RUNNER_TEMP}/sunshine-webui"
+          mkdir -p "${src}" "${out}" "${port}/files"
+          curl -fsSL "https://codeload.github.com/LizardByte/Sunshine/tar.gz/refs/tags/v${ver}" |
+            tar -xz --strip-components 1 -C "${src}"
+          cd "${src}"
+          # Same edits as the port's post-patch.
+          sed -i 's|outDir: resolve(assetsDstPath),|outDir: resolve(assetsDstPath), cssMinify: "esbuild",|' vite.config.js
+          npm install --ignore-scripts
+          npm install --no-save esbuild
+          SUNSHINE_SOURCE_ASSETS_DIR="${src}/src_assets" SUNSHINE_ASSETS_DIR="${out}" npm run build
+          tar -czf "${port}/files/webui-prebuilt.tar.gz" -C "${out}/assets" web
+          tar -tzf "${port}/files/webui-prebuilt.tar.gz" | grep -c . | sed 's/^/web UI files: /'
+
       - name: Setup FreeBSD
         uses: vmactions/freebsd-vm@4469451fe39bee80be4066836c5170362e9349f3  # v1.5.7
         with:
           arch: ${{ matrix.arch }}
           cpu: ${{ steps.processor_count.outputs.PROCESSOR_COUNT }}
+          # Default is 6 GB; poudriere runs its jails in tmpfs (USE_TMPFS=all)
+          # and the runner has 16 GB.
+          mem: ${{ matrix.build_mode == 'poudriere' && '12288' || '6144' }}
           envs: 'BRANCH BUILD_VERSION COMMIT PYTHON_VERSION'
+          # EXPERIMENTAL: cache the prepared VM image (post-prepare) so
+          # repeated iterations on this branch skip package installation
+          # entirely instead of re-running `prepare` from scratch every
+          # time -- see vmactions/vmactions-skill's SKILL.md, which calls
+          # this "the default choice, not an optimization to reach for
+          # later." Cache key hashes the prepare script + sync method, so
+          # it self-invalidates when either changes.
+          cache-after-prepare: true
           # TODO: there is no libcap for freebsd... we need graphics/libdrm if we find a way to use libcap
           prepare: |
             set -e
 
             pkg update
             pkg upgrade -y
-            pkg install -y \
-              audio/opus \
-              audio/pulseaudio \
-              devel/boost-all \
-              devel/cmake-core \
-              devel/doxygen \
-              devel/evdev-proto \
-              devel/git \
-              devel/libevdev \
-              devel/llvm${{ env.FREEBSD_CLANG_VERSION }} \
-              devel/ninja \
-              devel/pkgconf \
-              devel/uv \
-              devel/qt6-base \
-              ftp/curl \
-              graphics/graphviz \
-              graphics/libdrm \
-              graphics/qt6-svg \
-              graphics/shaderc \
-              graphics/vulkan-headers \
-              graphics/vulkan-loader \
-              graphics/wayland \
-              lang/python314 \
-              multimedia/libva \
-              multimedia/pipewire \
-              net/miniupnpc \
-              ports-mgmt/pkg \
-              security/openssl \
-              shells/bash \
-              www/npm-node22 \
-              x11/libX11 \
-              x11/libxcb \
-              x11/libXfixes \
-              x11/libXrandr \
-              x11/libXtst \
-              x11-servers/xorg-server
 
-            # create symlink for shebang bash compatibility
-            ln -s /usr/local/bin/bash /bin/bash
+            if [ "${{ matrix.build_mode }}" = "poudriere" ]; then
+              # poudriere builds Sunshine's own dependencies itself, inside
+              # its isolated jail, straight from the port's own
+              # BUILD_DEPENDS/LIB_DEPENDS/RUN_DEPENDS -- none of Sunshine's
+              # direct build dependencies below are needed on the host VM.
+              pkg install -y ports-mgmt/poudriere
 
-            # setup python
-            ln -s /usr/local/bin/python3.14 /usr/local/bin/python
+              # The image root is ZFS; nothing here needs synchronous writes
+              # or atime (pkg/sqlite fsync a lot, expensive under emulation).
+              zfs set sync=disabled atime=off "$(zfs list -H -o name | head -1)"
+
+              # Create the build jail here so it is part of the cached,
+              # prepared VM image and later runs skip it entirely. Only the
+              # settings jail creation needs; the build ones are appended in
+              # the poudriere step. url= (instead of http) installs the same
+              # release sets but skips freebsd-update (~8 min under arm64
+              # emulation, only patch-level fixes), and NO_SRC skips /usr/src.
+              mkdir -p /usr/local/poudriere/distfiles
+              printf '%s\n' \
+                NO_ZFS=yes \
+                BASEFS=/usr/local/poudriere \
+                DISTFILES_CACHE=/usr/local/poudriere/distfiles \
+                RESOLV_CONF=/etc/resolv.conf \
+                NO_SRC=yes > /usr/local/etc/poudriere.conf
+              poudriere jail -c -j fbsdjail -v ${{ matrix.bsd_release }}-RELEASE \
+                -a ${{ matrix.freebsd_target_arch }}.${{ matrix.freebsd_machine_arch }} \
+                -m url=https://download.FreeBSD.org/releases/${{ matrix.freebsd_target_arch }}/${{ matrix.freebsd_machine_arch }}/${{ matrix.bsd_release }}-RELEASE
+            else
+              pkg install -y \
+                audio/opus \
+                audio/pulseaudio \
+                devel/boost-all \
+                devel/cmake-core \
+                devel/doxygen \
+                devel/evdev-proto \
+                devel/git \
+                devel/libevdev \
+                devel/llvm${{ env.FREEBSD_CLANG_VERSION }} \
+                devel/ninja \
+                devel/pkgconf \
+                devel/uv \
+                devel/qt6-base \
+                ftp/curl \
+                graphics/graphviz \
+                graphics/libdrm \
+                graphics/qt6-svg \
+                graphics/shaderc \
+                graphics/vulkan-headers \
+                graphics/vulkan-loader \
+                graphics/wayland \
+                lang/python314 \
+                multimedia/libva \
+                multimedia/pipewire \
+                net/miniupnpc \
+                ports-mgmt/pkg \
+                security/openssl \
+                shells/bash \
+                www/npm-node22 \
+                x11/libX11 \
+                x11/libxcb \
+                x11/libXfixes \
+                x11/libXrandr \
+                x11/libXtst \
+                x11-servers/xorg-server
+
+              if [ "${{ matrix.build_mode }}" = "source" ]; then
+                # extra build tooling only needed to compile LizardByte/build-deps
+                # (FFmpeg + x264/x265/SvtAv1Enc) from source ourselves, since no
+                # prebuilt FreeBSD/aarch64 archive is currently published
+                pkg install -y \
+                  devel/autoconf \
+                  devel/automake \
+                  devel/gmake \
+                  devel/libtool \
+                  devel/nasm
+              fi
+
+              # create symlink for shebang bash compatibility
+              ln -s /usr/local/bin/bash /bin/bash
+
+              # setup python
+              ln -s /usr/local/bin/python3.14 /usr/local/bin/python
+            fi
           release: ${{ matrix.bsd_release }}
           run: |
             set -e
-            # Keep FreeBSD off Sunshine's default dependency path: lizardbyte-common[c]
-            # includes clang-format, which has no FreeBSD wheel and is slow to build.
-            set -- \
-              --locked \
-              --only-group glad \
-              --python "/usr/local/bin/python${PYTHON_VERSION}" \
-              --no-python-downloads \
-              --no-install-project
-            # uv.lock pins external artifacts; the reviewed vendored glad2 build hook is required.
-            uv sync "$@"  # NOSONAR(githubactions:S8541, githubactions:S8544)
-            set -- \
-              --project third-party/lizardbyte-common \
-              --locked \
-              --only-group test-c \
-              --python "/usr/local/bin/python${PYTHON_VERSION}" \
-              --no-python-downloads \
-              --no-install-project
-            # uv.lock pins the source artifact; FreeBSD must build lxml because no wheel is available.
-            uv sync "$@"  # NOSONAR(githubactions:S8541, githubactions:S8544)
 
-            # fix git safe.directory issues
-            git config --global --add safe.directory "*"
+            if [ "${{ matrix.build_mode }}" != "poudriere" ]; then
+              # fix git safe.directory issues (poudriere mode has no git)
+              git config --global --add safe.directory "*"
+
+              # Keep FreeBSD off Sunshine's default dependency path: lizardbyte-common[c]
+              # includes clang-format, which has no FreeBSD wheel and is slow to build.
+              set -- \
+                --locked \
+                --only-group glad \
+                --python "/usr/local/bin/python${PYTHON_VERSION}" \
+                --no-python-downloads \
+                --no-install-project
+              # uv.lock pins external artifacts; the reviewed vendored glad2 build hook is required.
+              uv sync "$@"  # NOSONAR(githubactions:S8541, githubactions:S8544)
+              set -- \
+                --project third-party/lizardbyte-common \
+                --locked \
+                --only-group test-c \
+                --python "/usr/local/bin/python${PYTHON_VERSION}" \
+                --no-python-downloads \
+                --no-install-project
+              # uv.lock pins the source artifact; FreeBSD must build lxml because no wheel is available.
+              uv sync "$@"  # NOSONAR(githubactions:S8541, githubactions:S8544)
+            fi
           sync: nfs  # sshfs is used for build-deps; however it's much slower than nfs
 
+      # EXPERIMENTAL (see matrix comment above): LizardByte/build-deps no
+      # longer publishes a prebuilt FreeBSD/aarch64 FFmpeg archive
+      # (build-deps#757, dropped for being slow under nested QEMU
+      # virtualization on GH-hosted runners). This step builds it from
+      # source instead, as a real timing measurement of whether that's
+      # actually true end-to-end in this exact CI environment, using the
+      # same build-deps CMake project upstream's own release process uses.
+      - name: Build FFmpeg from source (aarch64 experiment)
+        if: matrix.build_mode == 'source'
+        shell: freebsd {0}
+        run: |
+          set -e
+
+          cc_path="$(which clang${{ env.FREEBSD_CLANG_VERSION }})"
+          cxx_path="$(which clang++${{ env.FREEBSD_CLANG_VERSION }})"
+
+          build_deps_dir="${GITHUB_WORKSPACE}/../build-deps"
+          build_deps_dist="${GITHUB_WORKSPACE}/../build-deps-dist"
+
+          git clone --recurse-submodules --depth 1 \
+            https://github.com/LizardByte/build-deps.git "${build_deps_dir}"
+
+          # some build-deps scripts assume Linux's /bin/bash
+          for f in $(grep -rl '^#!/bin/bash$' "${build_deps_dir}" 2>/dev/null); do
+            sed -i '' "1s|^#!/bin/bash\$|#!/usr/local/bin/bash|" "$f"
+          done
+
+          cmake \
+            -B "${build_deps_dir}/build" \
+            -S "${build_deps_dir}" \
+            -G "Unix Makefiles" \
+            -DCMAKE_C_COMPILER="${cc_path}" \
+            -DCMAKE_CXX_COMPILER="${cxx_path}" \
+            -DCMAKE_MAKE_PROGRAM=gmake \
+            -DCMAKE_INSTALL_PREFIX="${build_deps_dist}"
+          gmake -C "${build_deps_dir}/build"
+          gmake -C "${build_deps_dir}/build" install
+
+          echo "FFMPEG_PREPARED_BINARIES=${build_deps_dist}/ffmpeg" >> "${GITHUB_ENV}"
+
       - name: Configure
+        if: matrix.build_mode != 'poudriere'
         shell: freebsd {0}
         run: |
           set -e
@@ -140,9 +384,15 @@ jobs:
           export CC="${cc_path}"
           export CXX="${cxx_path}"
 
+          cmake_extra_args=""
+          if [ -n "${FFMPEG_PREPARED_BINARIES:-}" ]; then
+            cmake_extra_args="-DFFMPEG_PREPARED_BINARIES=${FFMPEG_PREPARED_BINARIES}"
+          fi
+
           mkdir -p build
           cmake \
             -B build \
+            ${cmake_extra_args} \
             -G Ninja \
             -S . \
             -DBUILD_DOCS=ON \
@@ -164,6 +414,7 @@ jobs:
             -DSUNSHINE_PUBLISHER_ISSUE_URL="https://app.lizardbyte.dev/support"
 
       - name: Build
+        if: matrix.build_mode != 'poudriere'
         shell: freebsd {0}
         run: |
           set -e
@@ -171,6 +422,7 @@ jobs:
           ninja -C build
 
       - name: Package
+        if: matrix.build_mode != 'poudriere'
         shell: freebsd {0}
         run: |
           set -e
@@ -185,8 +437,144 @@ jobs:
           mv ./cpack_artifacts/Sunshine.pkg \
             ../artifacts/Sunshine-FreeBSD-${{ matrix.bsd_release }}-${{ matrix.cmake_processor }}.pkg
 
+      # EXPERIMENTAL (see matrix comment above): builds our actual FreeBSD
+      # ports-tree submission (poudriere + the real port Makefile/pkg-plist
+      # copied into .github/freebsd-port-experiment/) instead of Sunshine's
+      # own cmake/ninja/cpack CI flow, as a real timing comparison.
+      - name: Poudriere build (our actual FreeBSD port)
+        if: matrix.build_mode == 'poudriere'
+        shell: freebsd {0}
+        run: |
+          set -e
+
+          # aarch64: confirm the guest got the cheap PAC algorithm (API/GPI
+          # = implementation defined, APA/GPA = QARMA5).
+          if [ "${{ matrix.arch }}" = aarch64 ]; then
+            grep -E 'Instruction Set Attributes 1' /var/run/dmesg.boot || true
+          fi
+
+          # USE_TMPFS=all below: tmpfs only counts free/reclaimable memory
+          # as available, and the ZFS ARC is wired, so cap it or tmpfs can
+          # report ENOSPC while ARC still holds most of the RAM.
+          sysctl vfs.zfs.arc.max=2147483648 || sysctl vfs.zfs.arc_max=2147483648 || true
+
+          # Base settings and the fbsdjail jail come from the prepared VM
+          # image (see Setup FreeBSD's prepare). ALLOW_NETWORKING_PACKAGES
+          # must match the port's bare pkgname (${pkgname%-*}, i.e.
+          # "sunshine"), not its category/name origin ("multimedia/sunshine")
+          # -- a real bug we found and fixed in our own port work; see
+          # ffmpeg-build-deps-architecture-notes.md.
+          cat >> /usr/local/etc/poudriere.conf <<-'EOF'
+          ALLOW_NETWORKING_PACKAGES=sunshine
+          # Build jails (base, installed deps, wrkdir) in RAM instead of on
+          # the emulated disk; tearing a jail down becomes an unmount.
+          USE_TMPFS=all
+          # Without this poudriere writes DISABLE_MAKE_JOBS into the build
+          # jail's make.conf and every port compiles on a single core.
+          ALLOW_MAKE_JOBS=yes
+          # Fetch existing binary packages from FreeBSD's own official repo
+          # instead of building every one of ~500 dependencies from source
+          # on this cold, ephemeral jail. Requires -b matching this branch
+          # on the testport invocation below to actually take effect.
+          #
+          # quarterly (not latest): the quarterly repo is a frozen snapshot
+          # cut once per quarter and never changes; latest rebuilds weekly
+          # from HEAD, so it's only ever "close" to whatever our ports tree
+          # clone's exact commit is, not an exact match. Pinning our own
+          # ports tree checkout to the same quarterly branch below gets an
+          # exact match against every official package instead of a
+          # close-but-not-identical one, maximizing the fetch-hit rate.
+          PACKAGE_FETCH_BRANCH=quarterly
+          # poudriere.conf.sample's own PACKAGE_FETCH_URL example uses a
+          # literal \${ABI} placeholder, but poudriere never actually sets
+          # a shell variable named ABI anywhere (confirmed against its own
+          # common.sh source) -- it silently expands to empty, producing a
+          # broken double-slash URL (pkg.FreeBSD.org//quarterly) that
+          # "Package fetch: Not fetching as remote repository is
+          # unavailable" was the visible symptom of. Hardcode the real,
+          # verified-reachable ABI string per architecture instead.
+          PACKAGE_FETCH_URL=pkg+http://pkg.FreeBSD.org/FreeBSD:15:${{ matrix.freebsd_machine_arch }}
+          EOF
+
+          # quarterly branch (not HEAD) to exactly match the quarterly
+          # package repo above -- see comment on PACKAGE_FETCH_BRANCH.
+          # Tree extracted on the host into the NFS-mounted workspace, see
+          # "Extract ports tree".
+          poudriere ports -c -p default -m null -M "${GITHUB_WORKSPACE}/.ports-tree"
+          poudriere ports -c -p localoverlay -m null -M "${GITHUB_WORKSPACE}/.github/freebsd-port-experiment"
+
+          # poudriere never fetches ports-mgmt/pkg (it builds it itself as
+          # the bootstrap tool), so any fetched package depending on pkg --
+          # cmake-core, then cmake -- fails the repo sanity check and gets
+          # rebuilt (~18 min for cmake-core alone). Seed the official pkg
+          # package into the repo up front so they're kept as fetched. Repo
+          # creation extracts pkg-static from Latest/pkg.pkg (a link poudriere
+          # only makes for packages it builds), so create that link too.
+          pkgrepo=/usr/local/poudriere/data/packages/fbsdjail-default
+          mkdir -p "${pkgrepo}/All" "${pkgrepo}/Latest"
+          fetch -o /tmp/pkg.pkg "https://pkg.FreeBSD.org/FreeBSD:15:${{ matrix.freebsd_machine_arch }}/quarterly/Latest/pkg.pkg"
+          pkgname=$(pkg query -F /tmp/pkg.pkg '%n-%v')
+          cp /tmp/pkg.pkg "${pkgrepo}/All/${pkgname}.pkg"
+          ln -sf "../All/${pkgname}.pkg" "${pkgrepo}/Latest/pkg.pkg"
+          echo "Seeded ${pkgname}.pkg into ${pkgrepo}"
+
+          # Packages from the previous run (see "Restore poudriere package
+          # cache"). One cp for all files: every fork is costly under
+          # emulation. Never reuse a sunshine package: it must be rebuilt.
+          pkgcache="${GITHUB_WORKSPACE}/.poudriere-pkgs"
+          if ls "${pkgcache}"/*.pkg >/dev/null 2>&1; then
+            cp "${pkgcache}"/*.pkg "${pkgrepo}/All/"
+            rm -f "${pkgrepo}"/All/sunshine-*.pkg
+            echo "Restored $(ls "${pkgrepo}/All" | wc -l | tr -d ' ') packages from cache"
+          fi
+
+          # bulk -t runs the same QA as testport (plist, leftovers,
+          # install/deinstall) but, unlike testport, commits the built
+          # package to the repo so the artifact step below can find it.
+          # On failure, print poudriere's per-port error logs -- they live
+          # inside this VM and are otherwise lost when the job ends.
+          rc=0
+          poudriere bulk -t -b quarterly -j fbsdjail -p default -O localoverlay multimedia/sunshine || rc=$?
+
+          # Hand the (possibly updated) package set back to the host for
+          # "Save poudriere package cache", whether or not Sunshine built.
+          if [ "${{ steps.pkgs_cache.outputs.cache-hit }}" != true ] &&
+              ls "${pkgrepo}"/All/*.pkg >/dev/null 2>&1; then
+            rm -rf "${pkgcache}"
+            mkdir -p "${pkgcache}"
+            cp "${pkgrepo}"/All/*.pkg "${pkgcache}/"
+            rm -f "${pkgcache}"/sunshine-*.pkg
+          fi
+
+          if [ "${rc}" -ne 0 ]; then
+            for f in /usr/local/poudriere/data/logs/bulk/fbsdjail-default/latest/logs/errors/*.log; do
+              echo "===== ${f} ====="
+              tail -n 300 "${f}"
+            done
+            exit 1
+          fi
+
+          mkdir -p "${GITHUB_WORKSPACE}/artifacts"
+          find /usr/local/poudriere/data/packages -name 'sunshine-*.pkg' \
+            -exec cp {} "${GITHUB_WORKSPACE}/artifacts/Sunshine-FreeBSD-poudriere-${{ matrix.bsd_release }}-${{ matrix.cmake_processor }}.pkg" \;
+
+      - name: Save poudriere package cache
+        if: >-
+          always() && matrix.build_mode == 'poudriere' &&
+          steps.pkgs_cache.outputs.cache-hit != 'true' &&
+          hashFiles('.poudriere-pkgs/*.pkg') != ''
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: .poudriere-pkgs
+          key: ${{ steps.pkgs_cache.outputs.cache-primary-key }}
+
+      - name: Show QEMU invocation (aarch64)
+        if: always() && matrix.arch == 'aarch64'
+        shell: bash
+        run: grep -- '-machine' "${RUNNER_TEMP}/qemu-wrap.log" || cat "${RUNNER_TEMP}/qemu-wrap.log" || true
+
       - name: Debug
-        if: always()
+        if: always() && matrix.build_mode != 'poudriere'
         shell: bash
         working-directory: build/cpack_artifacts/_CPack_Packages/FreeBSD/FREEBSD/Sunshine
         run: |
@@ -212,6 +600,7 @@ jobs:
 
       - name: Test
         id: test
+        if: matrix.build_mode != 'poudriere'
         shell: freebsd {0}
         run: |
           set -e

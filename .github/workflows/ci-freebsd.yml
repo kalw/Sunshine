@@ -328,6 +328,9 @@ jobs:
           FREEBSD_HOST=ftp://ftp.freebsd.org
           RESOLV_CONF=/etc/resolv.conf
           ALLOW_NETWORKING_PACKAGES=sunshine
+          # Without this poudriere writes DISABLE_MAKE_JOBS into the build
+          # jail's make.conf and every port compiles on a single core.
+          ALLOW_MAKE_JOBS=yes
           # Fetch existing binary packages from FreeBSD's own official repo
           # instead of building every one of ~500 dependencies from source
           # on this cold, ephemeral jail. Requires -b matching this branch
@@ -361,7 +364,10 @@ jobs:
 
           poudriere jail -c -j fbsdjail -v ${{ matrix.bsd_release }}-RELEASE -a ${{ matrix.freebsd_target_arch }}.${{ matrix.freebsd_machine_arch }} -m http
 
-          poudriere testport -b quarterly -j fbsdjail -p default -O localoverlay multimedia/sunshine
+          # bulk -t runs the same QA as testport (plist, leftovers,
+          # install/deinstall) but, unlike testport, commits the built
+          # package to the repo so the artifact step below can find it.
+          poudriere bulk -t -b quarterly -j fbsdjail -p default -O localoverlay multimedia/sunshine
 
           mkdir -p "${GITHUB_WORKSPACE}/artifacts"
           find /usr/local/poudriere/data/packages -name 'sunshine-*.pkg' \

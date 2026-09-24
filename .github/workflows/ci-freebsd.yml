@@ -364,10 +364,30 @@ jobs:
 
           poudriere jail -c -j fbsdjail -v ${{ matrix.bsd_release }}-RELEASE -a ${{ matrix.freebsd_target_arch }}.${{ matrix.freebsd_machine_arch }} -m http
 
+          # poudriere never fetches ports-mgmt/pkg (it builds it itself as
+          # the bootstrap tool), so any fetched package depending on pkg --
+          # cmake-core, then cmake -- fails the repo sanity check and gets
+          # rebuilt (~18 min for cmake-core alone). Seed the official pkg
+          # package into the repo up front so they're kept as fetched.
+          pkgrepo=/usr/local/poudriere/data/packages/fbsdjail-default/All
+          mkdir -p "${pkgrepo}"
+          fetch -o /tmp/pkg.pkg "https://pkg.FreeBSD.org/FreeBSD:15:${{ matrix.freebsd_machine_arch }}/quarterly/Latest/pkg.pkg"
+          pkgname=$(pkg query -F /tmp/pkg.pkg '%n-%v')
+          cp /tmp/pkg.pkg "${pkgrepo}/${pkgname}.pkg"
+          echo "Seeded ${pkgname}.pkg into ${pkgrepo}"
+
           # bulk -t runs the same QA as testport (plist, leftovers,
           # install/deinstall) but, unlike testport, commits the built
           # package to the repo so the artifact step below can find it.
-          poudriere bulk -t -b quarterly -j fbsdjail -p default -O localoverlay multimedia/sunshine
+          # On failure, print poudriere's per-port error logs -- they live
+          # inside this VM and are otherwise lost when the job ends.
+          poudriere bulk -t -b quarterly -j fbsdjail -p default -O localoverlay multimedia/sunshine || {
+            for f in /usr/local/poudriere/data/logs/bulk/fbsdjail-default/latest/logs/errors/*.log; do
+              echo "===== ${f} ====="
+              tail -n 300 "${f}"
+            done
+            exit 1
+          }
 
           mkdir -p "${GITHUB_WORKSPACE}/artifacts"
           find /usr/local/poudriere/data/packages -name 'sunshine-*.pkg' \

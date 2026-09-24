@@ -114,16 +114,19 @@ CMAKE_ARGS+=	-DBUILD_DOCS=OFF \
 	-DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
 	-DFFMPEG_PREPARED_BINARIES=${BUILD_DEPS_DIST}/ffmpeg
 
-# Sunshine pins an exact Boost version for find_package(Boost CONFIG EXACT);
-# ports' boost-all/boost-libs is 1.91.0, not the 1.89.0 upstream pins, so
-# the exact-match lookup fails and falls back to a network FetchContent
-# that poudriere's build disallows. Point it at the version we actually have.
 post-patch:
-	@${REINPLACE_CMD} -e 's|set(BOOST_VERSION "1.89.0")|set(BOOST_VERSION "1.91.0")|' ${WRKSRC}/cmake/dependencies/Boost_Sunshine.cmake
 	@${REINPLACE_CMD} -e 's|"$${NPM}" ci $${NPM_INSTALL_FLAGS}|"$${NPM}" install $${NPM_INSTALL_FLAGS} \&\& "$${NPM}" install --no-save @rolldown/binding-wasm32-wasi@1.2.6 esbuild|' ${WRKSRC}/cmake/targets/common.cmake
 	@${REINPLACE_CMD} -e 's|outDir: resolve(assetsDstPath),|outDir: resolve(assetsDstPath), cssMinify: "esbuild",|' ${WRKSRC}/vite.config.js
 
+# Sunshine pins an exact Boost version for find_package(Boost CONFIG EXACT)
+# and falls back to a network FetchContent on mismatch. The ports tree's
+# Boost differs by branch (quarterly 1.89, HEAD 1.91), so pin it to whatever
+# boost-libs is actually installed -- known only after build-depends, hence
+# pre-configure rather than post-patch.
 pre-configure:
+	@boost_ver=`awk '/^#define BOOST_VERSION / { v = $$3; printf "%d.%d.%d", v / 100000, (v / 100) % 1000, v % 100 }' ${LOCALBASE}/include/boost/version.hpp`; \
+	    ${REINPLACE_CMD} -e "s|set(BOOST_VERSION \"[0-9.]*\")|set(BOOST_VERSION \"$$boost_ver\")|" ${WRKSRC}/cmake/dependencies/Boost_Sunshine.cmake; \
+	    ${ECHO_MSG} "===>  Pinned Sunshine's Boost lookup to installed $$boost_ver"
 	@${MKDIR} ${WRKDIR}/pydeps
 	@fetch -o ${WRKDIR}/pydeps/jinja2-3.1.6-py3-none-any.whl https://files.pythonhosted.org/packages/62/a1/3d680cbfd5f4b8f15abc1d571870c5fc3e594bb582bc3b64ea099db13e56/jinja2-3.1.6-py3-none-any.whl
 	@fetch -o ${WRKDIR}/pydeps/markupsafe-3.0.3.tar.gz https://files.pythonhosted.org/packages/7e/99/7690b6d4034fffd95959cbe0c02de8deb3098cc577c67bb6a24fe5d7caa7/markupsafe-3.0.3.tar.gz

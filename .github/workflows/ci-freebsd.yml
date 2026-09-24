@@ -119,11 +119,57 @@ jobs:
           time tar --zstd -xf .ports-cache/ports.tar.zst --strip-components 1 -C .ports-tree
           echo "Extracted ports ${{ steps.ports_tree.outputs.branch }} at ${{ steps.ports_tree.outputs.sha }}"
 
+      # Packages poudriere fetched on a previous run, keyed per arch and
+      # ports-tree commit; any older set is still useful (poudriere keeps
+      # what's current and refetches the rest). Skips the package fetch
+      # loops: ~25 min under arm64 emulation.
+      - name: Restore poudriere package cache
+        id: pkgs_cache
+        if: matrix.build_mode == 'poudriere'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: .poudriere-pkgs
+          key: poudriere-pkgs-${{ matrix.freebsd_machine_arch }}-${{ steps.ports_tree.outputs.sha }}
+          restore-keys: |
+            poudriere-pkgs-${{ matrix.freebsd_machine_arch }}-
+
+      # FreeBSD's arm64 kernel and base userland use pointer authentication
+      # everywhere, and anyvm boots this guest on `-cpu max`, whose default
+      # PAC algorithm (QARMA5) is very expensive under TCG. QEMU's
+      # implementation-defined algorithm is transparent to the guest and far
+      # cheaper to emulate. freebsd-vm has no cpu-type input, so wrap the
+      # binary anyvm finds on PATH.
+      - name: Use cheap PAC emulation for the aarch64 VM
+        if: matrix.arch == 'aarch64'
+        shell: bash
+        run: |
+          wrap="${RUNNER_TEMP}/qemu-wrap"
+          mkdir -p "${wrap}"
+          cat > "${wrap}/qemu-system-aarch64" <<'EOF'
+          #!/bin/bash
+          args=()
+          prev=
+          for a in "$@"; do
+            if [ "${prev}" = "-cpu" ] && [ "${a}" = "max" ]; then
+              a="max,pauth-impdef=on"
+            fi
+            args+=("${a}")
+            prev="${a}"
+          done
+          echo "qemu-system-aarch64 ${args[*]}" >> "${RUNNER_TEMP}/qemu-wrap.log"
+          exec /usr/bin/qemu-system-aarch64 "${args[@]}"
+          EOF
+          chmod +x "${wrap}/qemu-system-aarch64"
+          echo "${wrap}" >> "${GITHUB_PATH}"
+
       - name: Setup FreeBSD
         uses: vmactions/freebsd-vm@4469451fe39bee80be4066836c5170362e9349f3  # v1.5.7
         with:
           arch: ${{ matrix.arch }}
           cpu: ${{ steps.processor_count.outputs.PROCESSOR_COUNT }}
+          # Default is 6 GB; poudriere runs its jails in tmpfs (USE_TMPFS=all)
+          # and the runner has 16 GB.
+          mem: ${{ matrix.build_mode == 'poudriere' && '12288' || '6144' }}
           envs: 'BRANCH BUILD_VERSION COMMIT PYTHON_VERSION'
           # EXPERIMENTAL: cache the prepared VM image (post-prepare) so
           # repeated iterations on this branch skip package installation
@@ -145,7 +191,28 @@ jobs:
               # its isolated jail, straight from the port's own
               # BUILD_DEPENDS/LIB_DEPENDS/RUN_DEPENDS -- none of Sunshine's
               # direct build dependencies below are needed on the host VM.
-              pkg install -y ports-mgmt/poudriere devel/git
+              pkg install -y ports-mgmt/poudriere
+
+              # The image root is ZFS; nothing here needs synchronous writes
+              # or atime (pkg/sqlite fsync a lot, expensive under emulation).
+              zfs set sync=disabled atime=off "$(zfs list -H -o name | head -1)"
+
+              # Create the build jail here so it is part of the cached,
+              # prepared VM image and later runs skip it entirely. Only the
+              # settings jail creation needs; the build ones are appended in
+              # the poudriere step. url= (instead of http) installs the same
+              # release sets but skips freebsd-update (~8 min under arm64
+              # emulation, only patch-level fixes), and NO_SRC skips /usr/src.
+              mkdir -p /usr/local/poudriere/distfiles
+              printf '%s\n' \
+                NO_ZFS=yes \
+                BASEFS=/usr/local/poudriere \
+                DISTFILES_CACHE=/usr/local/poudriere/distfiles \
+                RESOLV_CONF=/etc/resolv.conf \
+                NO_SRC=yes > /usr/local/etc/poudriere.conf
+              poudriere jail -c -j fbsdjail -v ${{ matrix.bsd_release }}-RELEASE \
+                -a ${{ matrix.freebsd_target_arch }}.${{ matrix.freebsd_machine_arch }} \
+                -m url=https://download.FreeBSD.org/releases/${{ matrix.freebsd_target_arch }}/${{ matrix.freebsd_machine_arch }}/${{ matrix.bsd_release }}-RELEASE
             else
               pkg install -y \
                 audio/opus \
@@ -348,21 +415,28 @@ jobs:
         run: |
           set -e
 
-          # This CI VM has no ZFS pool; poudriere defaults to expecting one
-          # unless told otherwise. ALLOW_NETWORKING_PACKAGES must match the
-          # port's bare pkgname (${pkgname%-*}, i.e. "sunshine"), not its
-          # category/name origin ("multimedia/sunshine") -- a real bug we
-          # found and fixed in our own port work; see
-          # ffmpeg-build-deps-architecture-notes.md.
-          mkdir -p /usr/local/poudriere/distfiles
+          # aarch64: confirm the guest got the cheap PAC algorithm (API/GPI
+          # = implementation defined, APA/GPA = QARMA5).
+          if [ "${{ matrix.arch }}" = aarch64 ]; then
+            grep -E 'Instruction Set Attributes 1' /var/run/dmesg.boot || true
+          fi
 
-          cat > /usr/local/etc/poudriere.conf <<-'EOF'
-          NO_ZFS=yes
-          BASEFS=/usr/local/poudriere
-          DISTFILES_CACHE=/usr/local/poudriere/distfiles
-          FREEBSD_HOST=ftp://ftp.freebsd.org
-          RESOLV_CONF=/etc/resolv.conf
+          # USE_TMPFS=all below: tmpfs only counts free/reclaimable memory
+          # as available, and the ZFS ARC is wired, so cap it or tmpfs can
+          # report ENOSPC while ARC still holds most of the RAM.
+          sysctl vfs.zfs.arc.max=2147483648 || sysctl vfs.zfs.arc_max=2147483648 || true
+
+          # Base settings and the fbsdjail jail come from the prepared VM
+          # image (see Setup FreeBSD's prepare). ALLOW_NETWORKING_PACKAGES
+          # must match the port's bare pkgname (${pkgname%-*}, i.e.
+          # "sunshine"), not its category/name origin ("multimedia/sunshine")
+          # -- a real bug we found and fixed in our own port work; see
+          # ffmpeg-build-deps-architecture-notes.md.
+          cat >> /usr/local/etc/poudriere.conf <<-'EOF'
           ALLOW_NETWORKING_PACKAGES=sunshine
+          # Build jails (base, installed deps, wrkdir) in RAM instead of on
+          # the emulated disk; tearing a jail down becomes an unmount.
+          USE_TMPFS=all
           # Without this poudriere writes DISABLE_MAKE_JOBS into the build
           # jail's make.conf and every port compiles on a single core.
           ALLOW_MAKE_JOBS=yes
@@ -388,20 +462,7 @@ jobs:
           # unavailable" was the visible symptom of. Hardcode the real,
           # verified-reachable ABI string per architecture instead.
           PACKAGE_FETCH_URL=pkg+http://pkg.FreeBSD.org/FreeBSD:15:${{ matrix.freebsd_machine_arch }}
-          # Nothing here needs /usr/src in the jail; extracting it took most
-          # of the ~17 min jail creation under arm64 emulation.
-          NO_SRC=yes
           EOF
-
-          # Node's V8 JIT aborted mid vite build under QEMU aarch64
-          # ("Check failed: it->second.Size() > offset" in
-          # ThreadIsolation::StartOfJitAllocationAt, SIGTRAP); native aarch64
-          # is fine. Run node interpreter-only there. CI-side only, not part
-          # of the port.
-          if [ "${{ matrix.arch }}" = aarch64 ]; then
-            mkdir -p /usr/local/etc/poudriere.d
-            echo 'MAKE_ENV+=NODE_OPTIONS=--jitless' > /usr/local/etc/poudriere.d/make.conf
-          fi
 
           # quarterly branch (not HEAD) to exactly match the quarterly
           # package repo above -- see comment on PACKAGE_FETCH_BRANCH.
@@ -409,8 +470,6 @@ jobs:
           # "Extract ports tree".
           poudriere ports -c -p default -m null -M "${GITHUB_WORKSPACE}/.ports-tree"
           poudriere ports -c -p localoverlay -m null -M "${GITHUB_WORKSPACE}/.github/freebsd-port-experiment"
-
-          poudriere jail -c -j fbsdjail -v ${{ matrix.bsd_release }}-RELEASE -a ${{ matrix.freebsd_target_arch }}.${{ matrix.freebsd_machine_arch }} -m http
 
           # poudriere never fetches ports-mgmt/pkg (it builds it itself as
           # the bootstrap tool), so any fetched package depending on pkg --
@@ -427,22 +486,60 @@ jobs:
           ln -sf "../All/${pkgname}.pkg" "${pkgrepo}/Latest/pkg.pkg"
           echo "Seeded ${pkgname}.pkg into ${pkgrepo}"
 
+          # Packages from the previous run (see "Restore poudriere package
+          # cache"). One cp for all files: every fork is costly under
+          # emulation. Never reuse a sunshine package: it must be rebuilt.
+          pkgcache="${GITHUB_WORKSPACE}/.poudriere-pkgs"
+          if ls "${pkgcache}"/*.pkg >/dev/null 2>&1; then
+            cp "${pkgcache}"/*.pkg "${pkgrepo}/All/"
+            rm -f "${pkgrepo}"/All/sunshine-*.pkg
+            echo "Restored $(ls "${pkgrepo}/All" | wc -l | tr -d ' ') packages from cache"
+          fi
+
           # bulk -t runs the same QA as testport (plist, leftovers,
           # install/deinstall) but, unlike testport, commits the built
           # package to the repo so the artifact step below can find it.
           # On failure, print poudriere's per-port error logs -- they live
           # inside this VM and are otherwise lost when the job ends.
-          poudriere bulk -t -b quarterly -j fbsdjail -p default -O localoverlay multimedia/sunshine || {
+          rc=0
+          poudriere bulk -t -b quarterly -j fbsdjail -p default -O localoverlay multimedia/sunshine || rc=$?
+
+          # Hand the (possibly updated) package set back to the host for
+          # "Save poudriere package cache", whether or not Sunshine built.
+          if [ "${{ steps.pkgs_cache.outputs.cache-hit }}" != true ] &&
+              ls "${pkgrepo}"/All/*.pkg >/dev/null 2>&1; then
+            rm -rf "${pkgcache}"
+            mkdir -p "${pkgcache}"
+            cp "${pkgrepo}"/All/*.pkg "${pkgcache}/"
+            rm -f "${pkgcache}"/sunshine-*.pkg
+          fi
+
+          if [ "${rc}" -ne 0 ]; then
             for f in /usr/local/poudriere/data/logs/bulk/fbsdjail-default/latest/logs/errors/*.log; do
               echo "===== ${f} ====="
               tail -n 300 "${f}"
             done
             exit 1
-          }
+          fi
 
           mkdir -p "${GITHUB_WORKSPACE}/artifacts"
           find /usr/local/poudriere/data/packages -name 'sunshine-*.pkg' \
             -exec cp {} "${GITHUB_WORKSPACE}/artifacts/Sunshine-FreeBSD-poudriere-${{ matrix.bsd_release }}-${{ matrix.cmake_processor }}.pkg" \;
+
+      - name: Save poudriere package cache
+        if: >-
+          always() && matrix.build_mode == 'poudriere' &&
+          steps.pkgs_cache.outputs.cache-hit != 'true' &&
+          hashFiles('.poudriere-pkgs/*.pkg') != ''
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: .poudriere-pkgs
+          key: ${{ steps.pkgs_cache.outputs.cache-primary-key }}
+
+      - name: Show QEMU invocation (aarch64)
+        if: always() && matrix.arch == 'aarch64'
+        shell: bash
+        run: grep -- '-machine' "${RUNNER_TEMP}/qemu-wrap.log" || cat "${RUNNER_TEMP}/qemu-wrap.log" || true
 
       - name: Debug
         if: always() && matrix.build_mode != 'poudriere'

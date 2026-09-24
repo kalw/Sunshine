@@ -273,10 +273,10 @@ jobs:
           run: |
             set -e
 
-            # fix git safe.directory issues
-            git config --global --add safe.directory "*"
-
             if [ "${{ matrix.build_mode }}" != "poudriere" ]; then
+              # fix git safe.directory issues (poudriere mode has no git)
+              git config --global --add safe.directory "*"
+
               # Keep FreeBSD off Sunshine's default dependency path: lizardbyte-common[c]
               # includes clang-format, which has no FreeBSD wheel and is slow to build.
               set -- \

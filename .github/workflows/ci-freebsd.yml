@@ -84,6 +84,39 @@ jobs:
           echo "PROCESSOR_COUNT=${PROCESSOR_COUNT}" >> "${GITHUB_OUTPUT}"
           echo "PROCESSOR_COUNT: $PROCESSOR_COUNT"
 
+      # A git clone of the ports tree inside the VM is CPU-bound (object
+      # inflation + checkout of ~170k files): ~40s on amd64 but ~8 min under
+      # aarch64 emulation. Resolve the quarterly branch head natively on the
+      # host, cache a zstd tarball of exactly that commit keyed on its SHA,
+      # and only untar it in the VM (the workspace is NFS-mounted there).
+      - name: Resolve ports tree commit
+        id: ports_tree
+        if: matrix.build_mode == 'poudriere'
+        shell: bash
+        run: |
+          branch=2026Q3
+          sha=$(git ls-remote https://github.com/freebsd/freebsd-ports.git "refs/heads/${branch}" | cut -f1)
+          echo "branch=${branch}" >> "${GITHUB_OUTPUT}"
+          echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
+          echo "ports ${branch} at ${sha}"
+
+      - name: Cache ports tree tarball
+        id: ports_cache
+        if: matrix.build_mode == 'poudriere'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: .ports-cache
+          key: freebsd-ports-${{ steps.ports_tree.outputs.sha }}
+
+      - name: Fetch ports tree tarball
+        if: matrix.build_mode == 'poudriere' && steps.ports_cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          mkdir -p .ports-cache
+          curl -fsSL "https://codeload.github.com/freebsd/freebsd-ports/tar.gz/${{ steps.ports_tree.outputs.sha }}" |
+            gzip -d | zstd -q -T0 -3 -o .ports-cache/ports.tar.zst
+          ls -l .ports-cache
+
       - name: Setup FreeBSD
         uses: vmactions/freebsd-vm@4469451fe39bee80be4066836c5170362e9349f3  # v1.5.7
         with:
@@ -355,10 +388,13 @@ jobs:
           PACKAGE_FETCH_URL=pkg+http://pkg.FreeBSD.org/FreeBSD:15:${{ matrix.freebsd_machine_arch }}
           EOF
 
-          # shallow clone at the current quarterly branch (not HEAD) to
-          # exactly match the quarterly package repo above -- see comment
-          # on PACKAGE_FETCH_BRANCH.
-          git clone --depth 1 --branch 2026Q3 https://git.FreeBSD.org/ports.git /usr/local/poudriere/ports-src
+          # quarterly branch (not HEAD) to exactly match the quarterly
+          # package repo above -- see comment on PACKAGE_FETCH_BRANCH.
+          # Tarball of that commit prepared/cached on the host, see "Cache
+          # ports tree tarball".
+          mkdir -p /usr/local/poudriere/ports-src
+          tar -xf "${GITHUB_WORKSPACE}/.ports-cache/ports.tar.zst" --strip-components 1 -C /usr/local/poudriere/ports-src
+          echo "Extracted ports ${{ steps.ports_tree.outputs.branch }} at ${{ steps.ports_tree.outputs.sha }}"
           poudriere ports -c -p default -m null -M /usr/local/poudriere/ports-src
           poudriere ports -c -p localoverlay -m null -M "${GITHUB_WORKSPACE}/.github/freebsd-port-experiment"
 

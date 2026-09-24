@@ -54,6 +54,19 @@ jobs:
             runner: ubuntu-latest
             build_mode: poudriere
     steps:
+      # EXPERIMENTAL: amd64-poudriere failed with "No space left on device"
+      # once cache-after-prepare was added -- the cached VM image, FreeBSD
+      # base image, full ports tree, and poudriere's ~500 dependency
+      # packages together exceeded ubuntu-latest's default disk. Reuse the
+      # same fix Sunshine's own build-docker job already uses for the same
+      # class of problem (see .github/workflows/ci.yml's build-docker /
+      # LizardByte/.github's __call-docker.yml).
+      - name: More space
+        uses: LizardByte/actions/actions/more_space@39c468549cfb87ccb917e5e5342e18abc926dc48  # v2026.909.30231
+        with:
+          analyze-space-savings: true
+          clean-all: true
+
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:

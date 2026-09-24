@@ -23,15 +23,25 @@ jobs:
   build_freebsd:
     name: ${{ matrix.cmake_processor }}
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ matrix.timeout_minutes }}
     permissions:
       contents: read
     strategy:
       fail-fast: false
-      # EXPERIMENTAL: only the two poudriere entries remain (existing-style
-      # prebuilt/source entries dropped), run in parallel against each
-      # other -- isolating just the poudriere-vs-poudriere amd64/arm64
-      # comparison, not for merge.
+      # arm64 runs under QEMU TCG emulation: every poudriere phase is
+      # 10-20x slower than amd64 (~2.5h vs ~11 min measured). Build it only
+      # on pushes to master, or on PRs labelled "freebsd-arm64"; amd64 runs
+      # on every PR.
       matrix:
+        exclude:
+          - arch: >-
+              ${{ github.event_name == 'pull_request' &&
+              !contains(github.event.pull_request.labels.*.name, 'freebsd-arm64') &&
+              'aarch64' || 'none' }}
+        # EXPERIMENTAL: only the two poudriere entries remain (existing-style
+        # prebuilt/source entries dropped), run in parallel against each
+        # other -- isolating just the poudriere-vs-poudriere amd64/arm64
+        # comparison, not for merge.
         include:
           # EXPERIMENTAL: build via the actual FreeBSD ports-tree submission
           # (poudriere + the real port Makefile/pkg-plist, copied into
@@ -46,6 +56,7 @@ jobs:
             cmake_processor: amd64-poudriere
             runner: ubuntu-latest
             build_mode: poudriere
+            timeout_minutes: 45  # measured ~11-14 min
           - bsd_release: '15.1'
             arch: aarch64
             freebsd_target_arch: arm64
@@ -53,6 +64,7 @@ jobs:
             cmake_processor: arm64-poudriere
             runner: ubuntu-latest
             build_mode: poudriere
+            timeout_minutes: 330  # measured ~2.5h before --jitless; GH cap is 360
     steps:
       # EXPERIMENTAL: amd64-poudriere failed with "No space left on device"
       # once cache-after-prepare was added -- the cached VM image, FreeBSD
@@ -395,7 +407,20 @@ jobs:
           # unavailable" was the visible symptom of. Hardcode the real,
           # verified-reachable ABI string per architecture instead.
           PACKAGE_FETCH_URL=pkg+http://pkg.FreeBSD.org/FreeBSD:15:${{ matrix.freebsd_machine_arch }}
+          # Nothing here needs /usr/src in the jail; extracting it took most
+          # of the ~17 min jail creation under arm64 emulation.
+          NO_SRC=yes
           EOF
+
+          # Node's V8 JIT aborted mid vite build under QEMU aarch64
+          # ("Check failed: it->second.Size() > offset" in
+          # ThreadIsolation::StartOfJitAllocationAt, SIGTRAP); native aarch64
+          # is fine. Run node interpreter-only there. CI-side only, not part
+          # of the port.
+          if [ "${{ matrix.arch }}" = aarch64 ]; then
+            mkdir -p /usr/local/etc/poudriere.d
+            echo 'MAKE_ENV+=NODE_OPTIONS=--jitless' > /usr/local/etc/poudriere.d/make.conf
+          fi
 
           # quarterly branch (not HEAD) to exactly match the quarterly
           # package repo above -- see comment on PACKAGE_FETCH_BRANCH.

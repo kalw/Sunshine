@@ -84,11 +84,12 @@ jobs:
           echo "PROCESSOR_COUNT=${PROCESSOR_COUNT}" >> "${GITHUB_OUTPUT}"
           echo "PROCESSOR_COUNT: $PROCESSOR_COUNT"
 
-      # A git clone of the ports tree inside the VM is CPU-bound (object
-      # inflation + checkout of ~170k files): ~40s on amd64 but ~8 min under
-      # aarch64 emulation. Resolve the quarterly branch head natively on the
-      # host, cache a zstd tarball of exactly that commit keyed on its SHA,
-      # and only untar it in the VM (the workspace is NFS-mounted there).
+      # Materializing the ports tree inside the VM means creating ~170k files
+      # there, which is slow under aarch64 emulation (git clone ~8 min, plain
+      # untar still minutes). Resolve the quarterly branch head natively on
+      # the host, cache a zstd tarball of exactly that commit keyed on its
+      # SHA, and extract it on the host into the workspace; the VM reads it
+      # over the workspace NFS mount, so it creates no ports-tree files.
       - name: Resolve ports tree commit
         id: ports_tree
         if: matrix.build_mode == 'poudriere'
@@ -116,6 +117,14 @@ jobs:
           curl -fsSL "https://codeload.github.com/freebsd/freebsd-ports/tar.gz/${{ steps.ports_tree.outputs.sha }}" |
             gzip -d | zstd -q -T0 -3 -o .ports-cache/ports.tar.zst
           ls -l .ports-cache
+
+      - name: Extract ports tree
+        if: matrix.build_mode == 'poudriere'
+        shell: bash
+        run: |
+          mkdir -p .ports-tree
+          time tar --zstd -xf .ports-cache/ports.tar.zst --strip-components 1 -C .ports-tree
+          echo "Extracted ports ${{ steps.ports_tree.outputs.branch }} at ${{ steps.ports_tree.outputs.sha }}"
 
       - name: Setup FreeBSD
         uses: vmactions/freebsd-vm@4469451fe39bee80be4066836c5170362e9349f3  # v1.5.7
@@ -390,12 +399,9 @@ jobs:
 
           # quarterly branch (not HEAD) to exactly match the quarterly
           # package repo above -- see comment on PACKAGE_FETCH_BRANCH.
-          # Tarball of that commit prepared/cached on the host, see "Cache
-          # ports tree tarball".
-          mkdir -p /usr/local/poudriere/ports-src
-          tar -xf "${GITHUB_WORKSPACE}/.ports-cache/ports.tar.zst" --strip-components 1 -C /usr/local/poudriere/ports-src
-          echo "Extracted ports ${{ steps.ports_tree.outputs.branch }} at ${{ steps.ports_tree.outputs.sha }}"
-          poudriere ports -c -p default -m null -M /usr/local/poudriere/ports-src
+          # Tree extracted on the host into the NFS-mounted workspace, see
+          # "Extract ports tree".
+          poudriere ports -c -p default -m null -M "${GITHUB_WORKSPACE}/.ports-tree"
           poudriere ports -c -p localoverlay -m null -M "${GITHUB_WORKSPACE}/.github/freebsd-port-experiment"
 
           poudriere jail -c -j fbsdjail -v ${{ matrix.bsd_release }}-RELEASE -a ${{ matrix.freebsd_target_arch }}.${{ matrix.freebsd_machine_arch }} -m http
